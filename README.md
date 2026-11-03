@@ -2,9 +2,11 @@
 
 > **TASK 001** — Project Foundation & Engineering Infrastructure (Scaffolding Phase)
 
-A typed, asynchronous Python foundation for the **Anonymous Telegram Matching & Chat Bot**. This codebase provides centralized configuration, asynchronous PostgreSQL database access with SQLAlchemy 2.x and Alembic migrations, Redis caching & coordination, structured logging with automatic secret redaction, and a multi-stage Docker container build.
+A typed, asynchronous Python backend and engineering infrastructure for the **Anonymous Telegram Matching & Chat Bot**. 
 
-*Note: This repository represents foundation scaffolding and engineering infrastructure. It does not implement product features (such as user registration or chat routing) and is not yet designated for production deployment.*
+All user interactions, matchmaking workflows, chat mediation, and administration occur exclusively within Telegram via the Telegram Bot API (`aiogram`). The repository contains no web frontend, HTML interface, JavaScript/TypeScript client, or browser dashboard.
+
+*Note: This repository represents foundation scaffolding and engineering infrastructure (scaffolding phase). It does not implement product features (such as user registration or chat routing) and is not yet designated for production deployment.*
 
 ---
 
