@@ -1,7 +1,7 @@
 """Pytest global fixtures and test isolation helpers."""
 
 import os
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Generator
 
 import pytest
 import pytest_asyncio
@@ -16,11 +16,21 @@ from sqlalchemy.ext.asyncio import (
 from src.app.config.settings import AppEnvironment, Settings
 from src.app.infrastructure.database.base import Base
 
-# Ensure tests run with clean test environment variables
-os.environ["APP_ENV"] = "test"
-os.environ["BOT_TOKEN"] = "123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ_TEST"
-os.environ["POSTGRES_PASSWORD"] = "test_postgres_password"
-os.environ["TIMEZONE"] = "Asia/Tehran"
+# Ensure tests run with clean test environment variables without clobbering CI credentials
+os.environ.setdefault("APP_ENV", "test")
+os.environ.setdefault("BOT_TOKEN", "123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ_TEST")
+os.environ.setdefault("POSTGRES_PASSWORD", "test_postgres_password")
+os.environ.setdefault("TIMEZONE", "Asia/Tehran")
+
+
+@pytest.fixture(autouse=True)
+def reset_settings_cache() -> Generator[None, None, None]:
+    """Reset the lru_cache on get_settings before and after each test."""
+    from src.app.config.settings import get_settings
+
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture

@@ -45,16 +45,17 @@ async def test_database_manager_lifecycle(test_settings: Settings) -> None:
 
 
 @pytest.mark.asyncio
-async def test_session_rollback_on_exception(sqlite_engine: AsyncEngine) -> None:
+async def test_session_rollback_on_exception(
+    sqlite_engine: AsyncEngine,
+    test_settings: Settings,
+) -> None:
     """Verify that an exception inside the session context causes automatic rollback."""
     patch_engine = patch(
         "src.app.infrastructure.database.session.create_database_engine",
         return_value=sqlite_engine,
     )
     with patch_engine:
-        from src.app.config.settings import get_settings
-
-        manager = DatabaseManager(get_settings())
+        manager = DatabaseManager(test_settings)
         manager._engine = sqlite_engine
         from src.app.infrastructure.database.session import create_session_factory
 
