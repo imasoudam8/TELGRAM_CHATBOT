@@ -6,7 +6,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
-from src.app.bot.handlers import base_router
+from src.app.bot.handlers import get_base_router
 from src.app.bot.middlewares.logging import StructuredLoggingMiddleware
 from src.app.config.settings import Settings
 from src.app.infrastructure.database.session import DatabaseManager
@@ -26,7 +26,7 @@ def create_bot(settings: Settings) -> Bot:
 
 def setup_routers(dp: Dispatcher) -> None:
     """Register all modular application routers with the dispatcher."""
-    dp.include_router(base_router)
+    dp.include_router(get_base_router())
     logger.debug("Base router registered with dispatcher.")
 
 

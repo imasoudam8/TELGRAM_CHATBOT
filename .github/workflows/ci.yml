@@ -20,10 +20,41 @@ jobs:
     name: Lint, Compile & Test
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci_test_postgres_password
+          POSTGRES_DB: matching_bot_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d matching_bot_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
     env:
       APP_ENV: test
       BOT_TOKEN: "123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ_CI_TEST_TOKEN"
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: postgres
       POSTGRES_PASSWORD: "ci_test_postgres_password"
+      POSTGRES_DB: matching_bot_test
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
       TIMEZONE: "Asia/Tehran"
 
     steps:
@@ -55,4 +86,4 @@ jobs:
 
       - name: Run Test Suite
         run: |
-          pytest
+          pytest -v

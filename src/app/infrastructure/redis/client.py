@@ -3,6 +3,7 @@
 import logging
 
 from redis.asyncio import ConnectionPool, Redis
+
 from src.app.config.settings import Settings
 
 logger = logging.getLogger(__name__)

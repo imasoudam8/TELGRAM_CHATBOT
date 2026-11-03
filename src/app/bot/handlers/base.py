@@ -8,10 +8,7 @@ from aiogram.types import Message
 
 logger = logging.getLogger(__name__)
 
-router = Router(name="base")
 
-
-@router.message(CommandStart())
 async def handle_start_smoke_test(message: Message) -> None:
     """Handle /start command strictly as a connectivity verification smoke test.
 
@@ -25,3 +22,14 @@ async def handle_start_smoke_test(message: Message) -> None:
         "Anonymous Matching Bot service is running in health-check mode.\n"
         "Core infrastructure and network connectivity are operational."
     )
+
+
+def get_base_router() -> Router:
+    """Factory creating a new base router instance."""
+    router = Router(name="base")
+    router.message.register(handle_start_smoke_test, CommandStart())
+    return router
+
+
+# Module-level alias for convenience
+base_router = get_base_router()
