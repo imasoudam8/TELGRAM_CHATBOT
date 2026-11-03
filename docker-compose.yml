@@ -1,0 +1,86 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: matching_bot_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_secure_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-matching_bot}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - bot_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    # Note: No public ports published to satisfy security policy (internal network only)
+
+  redis:
+    image: redis:7-alpine
+    container_name: matching_bot_redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --save 60 1000
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    networks:
+      - bot_internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    # Note: No public ports published to satisfy security policy (internal network only)
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: matching_bot_app
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      APP_NAME: ${APP_NAME:-Anonymous Telegram Matching & Chat Bot}
+      TIMEZONE: ${TIMEZONE:-Asia/Tehran}
+      BOT_TOKEN: ${BOT_TOKEN}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_secure_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-matching_bot}
+      POSTGRES_ECHO: ${POSTGRES_ECHO:-false}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - bot_internal
+
+networks:
+  bot_internal:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    name: matching_bot_postgres_data
+  redis_data:
+    name: matching_bot_redis_data
