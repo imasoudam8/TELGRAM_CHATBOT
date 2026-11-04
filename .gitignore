@@ -1,11 +1,8 @@
-node_modules/
-build/
-dist/
-coverage/
-.DS_Store
-*.log
+# Environment and local secrets
 .env*
 !.env.example
+.DS_Store
+*.log
 
 # Python
 __pycache__/
@@ -13,6 +10,8 @@ __pycache__/
 *$py.class
 *.so
 .Python
+build/
+*.egg-info/
 
 # Virtual environments
 .venv/
@@ -20,11 +19,12 @@ venv/
 env/
 ENV/
 
-# Testing and linting
+# Testing, coverage, and linting
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
 .coverage
+coverage/
 htmlcov/
 
 # Local databases and runtime state

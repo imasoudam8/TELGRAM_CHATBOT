@@ -1,6 +1,0 @@
-{
-  "name": "Anonymous Telegram Matching & Chat Bot",
-  "description": "Production-ready engineering foundation and backend infrastructure for the Anonymous Telegram Matching and Chat Bot.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
