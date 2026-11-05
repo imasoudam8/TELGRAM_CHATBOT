@@ -962,9 +962,7 @@ chat = await session.execute(
     select(ChatSession).where(ChatSession.id == chat_id).with_for_update()
 ).scalar_one()
 
-if chat.is_charged or not (
-    chat.participant_one_sent_msg and chat.participant_two_sent_msg
-):
+if chat.is_charged or not (chat.participant_one_sent_msg and chat.participant_two_sent_msg):
     return  # Already settled or pending mutual participation
 
 # 2. Identify billing targets
