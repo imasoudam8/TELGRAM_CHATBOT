@@ -1,7 +1,7 @@
 # Database Architecture & Core Domain Data Model Specification
 
-**Document Version:** 1.1.0  
-**Phase:** Architecture Refinement & Constraint Hardening (TASK 002.1)  
+**Document Version:** 1.2.0  
+**Phase:** Core Architecture Finalization & Invariant Hardening (TASK 002.2)  
 **Target Engine:** PostgreSQL 16  
 **ORM / Data Layer:** SQLAlchemy 2.x (Async) & Alembic  
 **Caching & Ephemeral Layer:** Redis 7 (Async via `redis.asyncio`)  
@@ -19,35 +19,46 @@ The Anonymous Telegram Matching & Chat Bot is engineered as a **Modular Monolith
    - The private 64-bit Telegram User ID (`telegram_user_id`) is stored exclusively in the root `users` table. It is never exposed in profile lookups, matching queries, API responses, or bot messages.
    - Every user possesses an immutable, non-sequential alphanumeric `public_id` (e.g., `usr_7k9x2m4p8q1v`). Peer interactions, direct link requests, and profile exchanges reference `public_id` exclusively.
    - Phone numbers are never requested, ingested, or stored.
-   - User identity verification badges do not exist. Users self-declare adult eligibility ($\ge 18$) upon registration (`age_18_plus_declared`).
+   - User identity verification badges do not exist. Users explicitly self-declare adult eligibility ($\ge 18$) upon registration (`age_18_plus_declared`). No identity-verification terminology or mechanisms are used.
 2. **Clear Responsibility Boundary: PostgreSQL vs. Redis**:
-   - **PostgreSQL 16**: Authoritative persistent system of record for user accounts, profiles, matching preferences, permanent connections, blocks, chat sessions, message metadata, audit logs, reports, dynamic configuration, and the immutable financial ledger.
+   - **PostgreSQL 16**: Authoritative persistent system of record for user accounts, profiles, matching preferences, permanent connections, blocks, chat sessions, message metadata, normalized evidence holds, audit logs, reports, dynamic configuration, and the immutable financial ledger.
    - **Redis 7**: Ephemeral matchmaking queues, active waiting pools, live typing indicators, distributed concurrency locks, rate limits, and finite state machine (FSM) conversational wizard state.
-3. **Single-Table Append-Only Financial Ledger & Atomic Settlement**:
-   - Balance changes require row-level locking (`SELECT ... FOR UPDATE`) within ACID transactions, accompanied by immutable audit records in `wallet_ledgers` carrying unique idempotency keys.
-   - Financial operations are strictly encapsulated within the `Wallet Service`. No direct updates from matchers or chat routers are permitted.
-   - Daily free credits expire strictly at midnight in the `Asia/Tehran` timezone without carryover.
-   - The daily quota is dynamically configurable by Super Admins via `system_configurations` (no hardcoded quota assumption).
+3. **Single-Table Append-Only Financial Ledger & Traceable Allowances**:
+   - The ledger (`wallet_ledgers`) is an append-only transaction journal (not double-entry). Balance changes require row-level locking (`SELECT ... FOR UPDATE`) within ACID transactions, accompanied by immutable journal entries carrying unique idempotency keys.
+   - Every transaction consuming or modifying daily free credits is strictly traceable to the exact `wallet_daily_allowances` record and `Asia/Tehran` calendar date via a foreign key (`allowance_id`).
+   - Free credits are consumed before purchased credits.
+   - Daily free credits expire strictly at midnight in the `Asia/Tehran` timezone without carryover. Purchased credits never expire.
+   - The daily free quota is dynamically configurable by Super Admins via `system_configurations` (no hardcoded fixed quota).
+   - Financial operations are strictly encapsulated within the `Wallet Service`. No direct balance modifications from matchers or chat routers are permitted.
 4. **Conditional Deferred Chat Billing**:
    - Connecting participants is always free. Charges occur **only after both participants have sent at least one message**.
    - Random chat costs 1 coin per participant. Direct chat costs 2 coins to the requester only (the recipient pays 0 coins).
    - If mutual participation never occurs before chat termination, neither participant is charged.
+   - Direct request creation and acceptance are completely free.
    - All financial debits, ledger recordings, and chat session state updates occur within a **single atomic database transaction**.
 5. **Zero VPS Media Persistence & Strict Video Ceiling**:
    - The bot relays media using Telegram `file_id` references. No images, audio files, voice notes, or videos are downloaded or permanently stored on the host server disk.
-   - Video payloads of 10 MB or larger must be rejected. Both application validation and database schema constraints enforce a strict less-than comparison (`file_size_bytes < 10485760`).
-6. **Bounded Message Retention & Evidence Preservation**:
+   - Video payloads of 10 MB or larger ($10{,}485{,}760\text{ bytes}$) must always be rejected. Application validation and database schema constraints strictly enforce a less-than comparison (`file_size_bytes < 10485760`).
+6. **Bounded Message Retention & Normalized Multi-Evidence Holds**:
    - Routine message text and media metadata have a maximum normal retention period of **30 days** (`expires_at = created_at + INTERVAL '30 days'`).
-   - Routine scrubbing cleans expired records automatically.
-   - When a report is filed citing a message or chat session, an explicit evidence hold (`is_under_evidence_hold = TRUE`) restricts access and prevents deletion until moderation resolution or documented legal release.
+   - A message may be placed under hold by multiple independent reports or legal orders via a normalized `message_evidence_holds` junction entity.
+   - Resolving one report releases only its own hold; evidence is released for scrubbing only after all active holds are resolved.
+   - Database foreign key constraints (`ON DELETE RESTRICT`) prevent cascading deletions from silently destroying evidence under active holds.
+   - Access to held evidence is restricted strictly to authorized moderators.
 7. **Complete Bidirectional Block Enforcement**:
-   - A block between two users strictly prevents all communication and discovery in **both directions**.
-   - If either user blocks the other during an active chat, the chat terminates immediately and message delivery stops.
+   - A block between two users strictly prevents all communication, discovery, and requests in **both directions**.
+   - If either user blocks the other during an active chat, the chat terminates immediately (`end_reason = 'BLOCKED'`) and message routing halts.
 8. **Asymmetric Connection Removal**:
    - When User A removes User B from their contacts, only User A's connection record is updated. User B's record remains untouched. This action does not block either user.
-9. **Persistent Admin Configuration Inside Telegram**:
-   - All operational settings (prices, quotas, timeouts, rate limits, feature flags) are durably stored in `system_configurations` with complete audit trails in `admin_audit_logs`.
-   - Financial adjustments and configuration updates are strictly restricted to `SUPER_ADMIN`.
+9. **Persistent Admin Configuration with Hard Upper Bounds**:
+   - All operational settings are durably stored in `system_configurations` with complete audit trails in `admin_audit_logs`.
+   - Hard upper bounds are enforced directly at the schema level: `video_size_limit_bytes` can never exceed $10{,}485{,}760\text{ bytes}$, and `message_retention_days` can never exceed 30 days.
+   - Financial adjustments and configuration updates are restricted exclusively to `SUPER_ADMIN`.
+10. **Non-Reversible Account Deletion Pseudonymization**:
+    - Account deletion severs personal identity by replacing `telegram_user_id` with a randomly generated, cryptographically non-reversible surrogate identifier (not a plain hash).
+    - Status is set to `'DELETED'`, and profile PII is scrubbed.
+    - Financial ledger records are preserved for auditability via `ON DELETE RESTRICT`.
+    - A returning Telegram user registers as a completely new account with zero linkage to the deleted account.
 
 ---
 
@@ -56,15 +67,16 @@ The Anonymous Telegram Matching & Chat Bot is engineered as a **Modular Monolith
 | Domain Concern | PostgreSQL 16 (Durable System of Record) | Redis 7 (Ephemeral Cache / Locks / Queues) |
 | :--- | :--- | :--- |
 | **User Identity** | `users`, `user_profiles` | Cached user permission tier & ban flags (TTL: 10m) |
-| **System Settings** | `system_configurations` (Durable key-value store) | Cached configuration lookup (`config:<key>`, TTL: 5m) |
-| **Matching Preferences** | `user_preferences` (required & relaxable) | Geospatial / demographic indexed candidate pools |
+| **System Settings** | `system_configurations` (Durable store with hard bounds) | Cached configuration lookup (`config:<key>`, TTL: 5m) |
+| **Matching Preferences** | `user_preferences` (required & relaxable) | Demographic indexed candidate pools |
 | **Matchmaking Queue** | Historical match metrics & connection logs | Active waiting queues (Sorted Sets / Streams) |
 | **Active Chat Session** | `chat_sessions`, `active_chat_participants` | Active partner mapping (`user_id -> chat_id`, `partner_id`) |
 | **Chat Invariants** | Unique participant constraint in active chats | Concurrency locks (`lock:chat:settle:<chat_id>`) |
-| **Message Routing** | `chat_messages` metadata, hash & evidence holds | Live message rate-limiting (`ratelimit:<user_id>:msgs`) |
+| **Message Routing** | `chat_messages` metadata & retention deadlines | Live message rate-limiting (`ratelimit:<user_id>:msgs`) |
+| **Evidence Preservation** | `message_evidence_holds` (Normalized multi-holds) | Moderator access authorization tokens |
 | **Typing Indicators** | Not persisted | Ephemeral Pub/Sub events (`chat:<chat_id>:typing`) |
 | **Financial Balances** | `wallets`, `wallet_daily_allowances` | Cached balance display (`wallet:<user_id>:bal`) |
-| **Transaction Ledger** | `wallet_ledgers` (Immutable journal) | Distributed lock `lock:wallet:<user_id>` |
+| **Transaction Ledger** | `wallet_ledgers` (Append-only journal) | Distributed lock `lock:wallet:<user_id>` |
 | **User Blocks** | `user_blocks` (Permanent bidirectional store) | Fast Set lookup `blocks:<user_id>` |
 | **FSM Wizard State** | Incomplete profile drafts (durable save) | Active conversational step (`fsm:<user_id>:state`) |
 
@@ -97,9 +109,14 @@ erDiagram
     chat_sessions ||--o{ chat_messages : "contains messages"
     chat_sessions ||--o{ reports : "cited in"
 
+    chat_messages ||--o{ message_evidence_holds : "preserved under"
+    reports ||--o{ message_evidence_holds : "establishes hold"
+
+    wallet_daily_allowances ||--o{ wallet_ledgers : "reconciles free credit"
+
     users {
         bigint id PK
-        bigint telegram_user_id UK "Private"
+        bigint telegram_user_id UK "Private or Random Negative Surrogate"
         varchar public_id UK "Public Identifier"
         varchar status
         boolean age_18_plus_declared
@@ -111,6 +128,8 @@ erDiagram
 
     user_profiles {
         bigint user_id PK "FK references users"
+        boolean age_18_plus_declared "FK references users"
+        date registration_date
         varchar display_name
         varchar gender
         date birth_date
@@ -190,23 +209,39 @@ erDiagram
         varchar telegram_file_id
         bigint file_size_bytes
         integer duration_seconds
-        boolean is_under_evidence_hold
-        varchar evidence_hold_reason
         timestamptz created_at
         timestamptz expires_at
+    }
+
+    message_evidence_holds {
+        bigint id PK
+        bigint message_id FK
+        bigint report_id FK
+        varchar hold_type
+        varchar status
+        text reason
+        bigint created_by FK
+        timestamptz created_at
+        bigint released_by FK
+        timestamptz released_at
+        text release_notes
     }
 
     wallets {
         bigint user_id PK "FK references users"
         integer purchased_coins
+        timestamptz created_at
         timestamptz updated_at
     }
 
     wallet_daily_allowances {
-        bigint user_id PK "FK references users"
-        date allowance_date PK "Asia/Tehran date"
+        bigint id PK
+        bigint user_id FK
+        date allowance_date "Asia/Tehran date"
         integer allocated_credits
         integer used_credits
+        integer remaining_credits
+        timestamptz expires_at
         timestamptz updated_at
     }
 
@@ -215,9 +250,13 @@ erDiagram
         bigint wallet_user_id FK
         varchar idempotency_key UK
         varchar transaction_type
-        integer purchased_delta
-        integer free_delta
+        varchar credit_type
+        bigint allowance_id FK
+        date allowance_date
+        integer amount
+        integer purchased_balance_before
         integer purchased_balance_after
+        integer free_balance_before
         integer free_balance_after
         varchar reference_id
         varchar actor_type
@@ -295,7 +334,7 @@ Represents the root identity record. Contains authentication routing metadata an
 | Column Name | PostgreSQL Type | Nullable | Default | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | `id` | `BIGINT GENERATED ALWAYS AS IDENTITY` | **NO** | *Sequence* | Internal surrogate primary key. |
-| `telegram_user_id` | `BIGINT` | **NO** | — | Private 64-bit signed Telegram ID. Strictly private. |
+| `telegram_user_id` | `BIGINT` | **NO** | — | Private 64-bit signed Telegram ID. Replaced with random surrogate upon deletion. |
 | `public_id` | `VARCHAR(32)` | **NO** | — | Non-sequential alphanumeric identifier (e.g. `usr_9k2m4x`). |
 | `status` | `VARCHAR(20)` | **NO** | `'ACTIVE'` | `'ACTIVE'`, `'SUSPENDED'`, `'BANNED'`, `'DELETED'`. |
 | `age_18_plus_declared` | `BOOLEAN` | **NO** | `FALSE` | Explicit declaration that user is $\ge 18$. Does not imply identity verification. |
@@ -310,7 +349,10 @@ Represents the root identity record. Contains authentication routing metadata an
   - `PRIMARY KEY (id)`
   - `UNIQUE (telegram_user_id)`
   - `UNIQUE (public_id)`
+  - `UNIQUE (id, age_18_plus_declared)` *(Composite target for profile relational integrity)*
   - `CHECK (status IN ('ACTIVE', 'SUSPENDED', 'BANNED', 'DELETED'))`
+  - `CHECK ((age_18_plus_declared = FALSE AND age_declared_at IS NULL) OR (age_18_plus_declared = TRUE AND age_declared_at IS NOT NULL))`
+  - `CHECK (age_declared_at IS NULL OR age_declared_at >= created_at)`
   - `INDEX idx_users_public_id (public_id)`
   - `INDEX idx_users_status (status) WHERE status = 'ACTIVE'`
 
@@ -323,7 +365,9 @@ Public profile attributes presented during anonymous peer discovery.
 
 | Column Name | PostgreSQL Type | Nullable | Default | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| `user_id` | `BIGINT` | **NO** | — | Foreign key references `users(id)`. |
+| `user_id` | `BIGINT` | **NO** | — | Primary key & foreign key references `users(id)`. |
+| `age_18_plus_declared` | `BOOLEAN` | **NO** | `TRUE` | Foreign key component referencing `users(id, age_18_plus_declared)`. Must be `TRUE`. |
+| `registration_date` | `DATE` | **NO** | — | Immutable calendar date of user registration (`users.created_at::date`). |
 | `display_name` | `VARCHAR(50)` | **NO** | — | Chosen alias inside the bot (NOT Telegram username). |
 | `gender` | `VARCHAR(20)` | **NO** | — | `'MALE'`, `'FEMALE'`, `'NON_BINARY'`, `'OTHER'`. |
 | `birth_date` | `DATE` | **NO** | — | User-declared birth date. |
@@ -334,19 +378,24 @@ Public profile attributes presented during anonymous peer discovery.
 | `created_at` | `TIMESTAMPTZ` | **NO** | `now()` | UTC creation timestamp. |
 | `updated_at` | `TIMESTAMPTZ` | **NO** | `now()` | UTC last modification timestamp. |
 
-- **Age Eligibility Validation Architecture**:
-  - *PostgreSQL Rule*: PostgreSQL prohibits non-immutable functions like `CURRENT_DATE` inside table `CHECK` constraints because `CURRENT_DATE` changes dynamically over time. Attempting `CHECK (birth_date <= CURRENT_DATE - INTERVAL '18 years')` causes runtime syntax or dump/restore errors.
-  - *Safe Implementation Pattern*:
-    1. The user must explicitly confirm the 18+ declaration button in the Telegram registration wizard, setting `users.age_18_plus_declared = TRUE` and `users.age_declared_at = now()`.
-    2. During registration and profile updates, application service validation calculates `declared_age = relativedelta(today_tehran, birth_date).years` and rejects any value $< 18$.
-    3. To provide an immutable database-level invariant against corrupted historical data, the schema enforces:
-       `CHECK (birth_date <= (created_at::date - INTERVAL '18 years'))`. This relies solely on immutable column values.
-    4. Neither the database field nor the UI implies identity verification; it represents self-declared adult eligibility.
+- **Age Eligibility & Invariant Enforcement Architecture**:
+  1. **Strict Terminology & Anti-Verification Discipline**: No identity verification, KYC, or verified badges exist. The system strictly records self-declared adult eligibility.
+  2. **Application-Layer Validation (`Asia/Tehran`)**: During onboarding and profile edits, application validation calculates the user's declared age using the official `Asia/Tehran` calendar date:
+     ```python
+     tehran_today = datetime.now(ZoneInfo("Asia/Tehran")).date()
+     declared_age = relativedelta(tehran_today, declared_birth_date).years
+     if declared_age < 18:
+         raise AgeEligibilityViolation("User must be at least 18 years old in Asia/Tehran calendar.")
+     ```
+  3. **Relational Profile Creation Guard**: A user cannot create or maintain a profile without active adult declaration. The composite foreign key `FOREIGN KEY (user_id, age_18_plus_declared) REFERENCES users(id, age_18_plus_declared) ON DELETE RESTRICT` combined with `CHECK (age_18_plus_declared = TRUE)` physically prevents inserting a profile for any user where `age_18_plus_declared` is `FALSE`.
+  4. **PostgreSQL Immutability Safe Guard**: To avoid illegal non-immutable functions (`CURRENT_DATE`), the database invariant references the user's immutable registration date:
+     `CHECK (birth_date <= (registration_date - INTERVAL '18 years'))`.
 - **Constraints & Indexes**:
   - `PRIMARY KEY (user_id)`
-  - `FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT` *(Prevents hard delete cascading to preserve ledger linkage)*
+  - `FOREIGN KEY (user_id, age_18_plus_declared) REFERENCES users(id, age_18_plus_declared) ON DELETE RESTRICT`
+  - `CHECK (age_18_plus_declared = TRUE)`
+  - `CHECK (birth_date <= (registration_date - INTERVAL '18 years'))`
   - `CHECK (gender IN ('MALE', 'FEMALE', 'NON_BINARY', 'OTHER'))`
-  - `CHECK (birth_date <= (created_at::date - INTERVAL '18 years'))`
   - `CHECK (completion_status IN ('INCOMPLETE', 'COMPLETED'))`
   - `CHECK (visibility IN ('PUBLIC', 'ANONYMOUS', 'HIDDEN'))`
   - `INDEX idx_profiles_matching (gender, city, completion_status) WHERE visibility = 'PUBLIC'`
@@ -374,7 +423,6 @@ Matching criteria configured by users for random matchmaking and discovery.
   - `PRIMARY KEY (user_id)`
   - `FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT`
   - `CHECK (min_age >= 18 AND max_age <= 99 AND min_age <= max_age)`
-  - **Invariance Rule**: The matching engine strictly forbids relaxing `preferred_genders` or age boundaries without explicit user consent.
 
 ---
 
@@ -394,17 +442,17 @@ Direct chat invitations initiated from user profile views or shared public links
 | `responded_at` | `TIMESTAMPTZ` | YES | `NULL` | UTC decision timestamp. |
 
 - **Lifecycle & Financial Rules**:
-  - Creating a direct request does not debit coins immediately.
-  - Accepting a direct request is **completely free** (0 coins for both users).
-  - Coins are charged only after connection when both participants have exchanged messages in the direct chat session.
-  - If a user blocks the other while a direct request is pending, the request status is immediately set to `'CANCELLED'`.
+  - Direct request creation is **completely free** (0 coins).
+  - Direct request acceptance is **completely free** (0 coins).
+  - When connection is accepted, chat is charged only after **mutual message exchange**, and costs 2 coins to the **requester only** (the recipient pays 0 coins).
+  - If a user blocks another while a request is pending, the request is immediately transitioned to `'CANCELLED'`.
 - **Constraints & Indexes**:
   - `PRIMARY KEY (id)`
   - `FOREIGN KEY (requester_id) REFERENCES users(id) ON DELETE RESTRICT`
   - `FOREIGN KEY (target_id) REFERENCES users(id) ON DELETE RESTRICT`
   - `CHECK (requester_id <> target_id)`
   - `CHECK (status IN ('PENDING', 'ACCEPTED', 'REJECTED', 'EXPIRED', 'CANCELLED'))`
-  - `UNIQUE (requester_id, target_id)` where `status = 'PENDING'` *(Prevents duplicate active requests)*
+  - `UNIQUE (requester_id, target_id)` where `status = 'PENDING'`
   - `INDEX idx_direct_requests_inbox (target_id, status) WHERE status = 'PENDING'`
   - `INDEX idx_direct_requests_expiry (status, expires_at) WHERE status = 'PENDING'`
 
@@ -421,8 +469,7 @@ Permanent bilateral contact address book. Supports approved asymmetric removal.
 | `updated_at` | `TIMESTAMPTZ` | **NO** | `now()` | When entry status changed. |
 
 - **Asymmetric Removal Invariant**:
-  - When User A removes User B from their contacts, only User A's row is updated to `'REMOVED'`.
-  - User B's row remains `'ACTIVE'` in User B's own address book.
+  - When User A removes User B from their contacts, User A's row is updated to `'REMOVED'`. User B's row remains `'ACTIVE'`.
   - Removing a connection does **not** block either user.
 - **Constraints & Indexes**:
   - `PRIMARY KEY (id)`
@@ -444,17 +491,18 @@ Bidirectional communication prohibition.
 
 - **Complete Block Enforcement Across All Workflows**:
   1. **Random Matchmaking**: Candidate pools exclude users where a block exists in either direction.
-  2. **Profile Discovery & Search**: Profiles of blocked/blocker users are invisible.
+  2. **Profile Discovery & Search**: Profiles of blocked/blocker users are invisible in both directions.
   3. **Direct Requests**: Direct requests between blocked pairs are strictly rejected.
   4. **Pending Requests**: If User A blocks User B while a request is pending between them, the request is set to `'CANCELLED'`.
   5. **Active Chats**: If either participant blocks the other during an active chat, the chat is **immediately terminated** (`end_reason = 'BLOCKED'`), participant entries are deleted from `active_chat_participants`, and further message delivery is stopped.
   6. **Message Routing**: Incoming messages between blocked pairs are rejected at the router level.
+  7. **Contacts**: Blocked users are suppressed from active contact listings.
 - **Constraints & Indexes**:
   - `PRIMARY KEY (blocker_id, blocked_id)`
   - `FOREIGN KEY (blocker_id) REFERENCES users(id) ON DELETE RESTRICT`
   - `FOREIGN KEY (blocked_id) REFERENCES users(id) ON DELETE RESTRICT`
   - `CHECK (blocker_id <> blocked_id)`
-  - `INDEX idx_user_blocks_reverse (blocked_id, blocker_id)` *(Enables fast bidirectional lookup)*
+  - `INDEX idx_user_blocks_reverse (blocked_id, blocker_id)`
 
 ---
 
@@ -501,11 +549,11 @@ Junction table enforcing the **"One active chat per user"** invariant at the sch
   - `PRIMARY KEY (user_id)` *(Guarantees a user can never be inserted into two active chats concurrently)*
   - `FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT`
   - `FOREIGN KEY (chat_id) REFERENCES chat_sessions(id) ON DELETE CASCADE`
-  - **Lifecycle**: Rows are inserted when a chat transitions to `ACTIVE`, and deleted when the chat transitions to `ENDED`.
+  - Rows are inserted when a chat transitions to `ACTIVE`, and deleted when the chat transitions to `ENDED`.
 
 ---
 
-### Domain Area F: Messages and Media Metadata
+### Domain Area F: Messages, Retention, and Normalized Evidence Holds
 
 #### Table: `chat_messages`
 Stores message metadata, retention deadlines, and Telegram media identifiers without local file storage.
@@ -513,7 +561,7 @@ Stores message metadata, retention deadlines, and Telegram media identifiers wit
 | Column Name | PostgreSQL Type | Nullable | Default | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | `id` | `BIGINT GENERATED ALWAYS AS IDENTITY` | **NO** | *Sequence* | Primary key. |
-| `chat_id` | `UUID` | **NO** | — | References `chat_sessions(id)`. |
+| `chat_id` | `UUID` | **NO** | — | References `chat_sessions(id)` ON DELETE RESTRICT. |
 | `sender_id` | `BIGINT` | **NO** | — | References `users(id)`. |
 | `recipient_id` | `BIGINT` | **NO** | — | References `users(id)`. |
 | `message_type` | `VARCHAR(20)` | **NO** | — | `'TEXT'`, `'PHOTO'`, `'VOICE'`, `'VIDEO'`, `'STICKER'`, `'ANIMATION'`. |
@@ -521,27 +569,79 @@ Stores message metadata, retention deadlines, and Telegram media identifiers wit
 | `telegram_file_id` | `VARCHAR(255)` | YES | `NULL` | Telegram `file_id` string for bot relaying. |
 | `file_size_bytes` | `BIGINT` | YES | `NULL` | Media file size in bytes. |
 | `duration_seconds` | `INTEGER` | YES | `NULL` | Duration for audio/video media. |
-| `is_under_evidence_hold` | `BOOLEAN` | **NO** | `FALSE` | TRUE when cited in an active report; suspends scrubbing. |
-| `evidence_hold_reason` | `VARCHAR(100)` | YES | `NULL` | Reference to report or legal hold order. |
 | `created_at` | `TIMESTAMPTZ` | **NO** | `now()` | UTC dispatch timestamp. |
 | `expires_at` | `TIMESTAMPTZ` | **NO** | — | Normal retention deadline (`created_at + INTERVAL '30 days'`). |
 
-- **Retention & Evidence Hold Design**:
-  1. `expires_at` is assigned at insert time as `created_at + INTERVAL '30 days'`.
-  2. A scheduled scrubbing worker cleans expired records:
-     `DELETE FROM chat_messages WHERE expires_at < now() AND is_under_evidence_hold = FALSE;`
-  3. When a report is filed citing a message or chat, `is_under_evidence_hold` is set to `TRUE`, protecting the record from deletion. Access to held messages is restricted strictly to assigned moderators.
-  4. When the report is resolved, the hold is released (`is_under_evidence_hold = FALSE`, `expires_at = now()`), allowing immediate cleanup in the next scrubbing pass.
-  5. There is no indefinite routine message retention.
+- **Retention & Hard Bound Rules**:
+  1. Routine message retention is strictly capped at a maximum of 30 days:
+     `CHECK (expires_at <= created_at + INTERVAL '30 days')`.
+  2. Videos at or above 10 MB ($10{,}485{,}760\text{ bytes}$) must always be rejected:
+     `CHECK (message_type <> 'VIDEO' OR file_size_bytes < 10485760)`.
+  3. `FOREIGN KEY (chat_id) REFERENCES chat_sessions(id) ON DELETE RESTRICT` ensures that deleting a chat session cannot cascade-delete messages while message rows or evidence holds exist.
 - **Constraints & Indexes**:
   - `PRIMARY KEY (id)`
-  - `FOREIGN KEY (chat_id) REFERENCES chat_sessions(id) ON DELETE CASCADE`
+  - `FOREIGN KEY (chat_id) REFERENCES chat_sessions(id) ON DELETE RESTRICT`
   - `FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE RESTRICT`
   - `FOREIGN KEY (recipient_id) REFERENCES users(id) ON DELETE RESTRICT`
   - `CHECK (message_type IN ('TEXT', 'PHOTO', 'VOICE', 'VIDEO', 'STICKER', 'ANIMATION'))`
   - `CHECK (message_type <> 'VIDEO' OR file_size_bytes < 10485760)` *(Strict $< 10\text{ MB}$ video ceiling)*
+  - `CHECK (expires_at <= created_at + INTERVAL '30 days')` *(Strict 30-day maximum retention)*
   - `INDEX idx_chat_messages_chat_time (chat_id, created_at)`
-  - `INDEX idx_chat_messages_retention_scrub (expires_at) WHERE is_under_evidence_hold = FALSE`
+  - `INDEX idx_chat_messages_cleanup (expires_at)`
+
+#### Table: `message_evidence_holds`
+Normalized evidence-hold relationship supporting multiple concurrent reports and legal holds on message records.
+
+| Column Name | PostgreSQL Type | Nullable | Default | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `id` | `BIGINT GENERATED ALWAYS AS IDENTITY` | **NO** | *Sequence* | Primary key. |
+| `message_id` | `BIGINT` | **NO** | — | Foreign key references `chat_messages(id)` ON DELETE RESTRICT. |
+| `report_id` | `BIGINT` | YES | `NULL` | Foreign key references `reports(id)` ON DELETE RESTRICT. |
+| `hold_type` | `VARCHAR(30)` | **NO** | — | `'USER_REPORT'`, `'LEGAL_HOLD'`, `'SAFETY_AUDIT'`. |
+| `status` | `VARCHAR(20)` | **NO** | `'ACTIVE'` | `'ACTIVE'`, `'RELEASED'`. |
+| `reason` | `TEXT` | **NO** | — | Justification for hold placement. |
+| `created_by` | `BIGINT` | YES | `NULL` | References `users(id)` (Admin or system). |
+| `created_at` | `TIMESTAMPTZ` | **NO** | `now()` | Hold creation timestamp. |
+| `released_by` | `BIGINT` | YES | `NULL` | References `users(id)` (Moderator releasing hold). |
+| `released_at` | `TIMESTAMPTZ` | YES | `NULL` | Timestamp when hold was released. |
+| `release_notes` | `TEXT` | YES | `NULL` | Commentary on hold release rationale. |
+
+- **Normalized Hold Architecture & Multi-Report Independence**:
+  1. **Multiple Independent Holds**: A message may be cited by multiple distinct reports (e.g., Report 101 and Report 102). Each report creates its own row in `message_evidence_holds`.
+  2. **Chat-Level Report Scope**: When a report cites an entire `chat_session_id`, the system determines the message evidence scope (all messages in the session up to the report submission timestamp) and creates a `message_evidence_holds` entry for each message within that scope:
+     ```sql
+     INSERT INTO message_evidence_holds (message_id, report_id, hold_type, reason, created_at)
+     SELECT id, :report_id, 'USER_REPORT', 'Scoped chat session report evidence', now()
+     FROM chat_messages
+     WHERE chat_id = :chat_session_id AND created_at <= :report_created_at
+     ON CONFLICT (message_id, report_id) DO NOTHING;
+     ```
+  3. **Release Isolation**: Resolving Report 101 marks its associated hold rows as `RELEASED`. If Report 102 remains `ACTIVE`, the message remains protected. Evidence is eligible for routine scrubbing **only after all applicable holds are released**.
+  4. **Cascade Prevention**: `message_evidence_holds` references `chat_messages(id)` with `ON DELETE RESTRICT`. Database cascades can never silently destroy evidence under an active hold.
+  5. **Moderator-Restricted Access**: Messages whose `expires_at < now()` that remain under active evidence hold are accessible strictly to authorized moderators (`admin_users.role IN ('MODERATOR', 'SUPER_ADMIN')`). Standard user endpoints and bot handlers never return expired messages.
+  6. **Routine Scrubbing Worker Query**:
+     ```sql
+     DELETE FROM chat_messages m
+     WHERE m.expires_at < now()
+       AND NOT EXISTS (
+         SELECT 1
+         FROM message_evidence_holds h
+         WHERE h.message_id = m.id
+           AND h.status = 'ACTIVE'
+       );
+     ```
+- **Constraints & Indexes**:
+  - `PRIMARY KEY (id)`
+  - `FOREIGN KEY (message_id) REFERENCES chat_messages(id) ON DELETE RESTRICT`
+  - `FOREIGN KEY (report_id) REFERENCES reports(id) ON DELETE RESTRICT`
+  - `FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT`
+  - `FOREIGN KEY (released_by) REFERENCES users(id) ON DELETE RESTRICT`
+  - `CHECK (hold_type IN ('USER_REPORT', 'LEGAL_HOLD', 'SAFETY_AUDIT'))`
+  - `CHECK (status IN ('ACTIVE', 'RELEASED'))`
+  - `CHECK ((status = 'ACTIVE' AND released_at IS NULL AND released_by IS NULL) OR (status = 'RELEASED' AND released_at IS NOT NULL))`
+  - `UNIQUE (message_id, report_id)` where `report_id IS NOT NULL`
+  - `INDEX idx_evidence_holds_active (message_id) WHERE status = 'ACTIVE'`
+  - `INDEX idx_evidence_holds_report (report_id) WHERE report_id IS NOT NULL`
 
 ---
 
@@ -567,51 +667,76 @@ Isolates daily promotional free credits. Allocations are driven dynamically by `
 
 | Column Name | PostgreSQL Type | Nullable | Default | Description |
 | :--- | :--- | :--- | :--- | :--- |
+| `id` | `BIGINT GENERATED ALWAYS AS IDENTITY` | **NO** | *Sequence* | Primary key for ledger lineage tracking. |
 | `user_id` | `BIGINT` | **NO** | — | References `users(id)`. |
 | `allowance_date` | `DATE` | **NO** | — | Calendar date in `Asia/Tehran` timezone. |
 | `allocated_credits` | `INTEGER` | **NO** | — | Credits allocated for this date based on dynamic configuration. |
 | `used_credits` | `INTEGER` | **NO** | `0` | Credits consumed so far on this date. |
-| `updated_at` | `TIMESTAMPTZ` | **NO** | `now()` | Last usage timestamp. |
+| `remaining_credits` | `INTEGER GENERATED ALWAYS AS (allocated_credits - used_credits) STORED` | **NO** | — | Available free credits remaining. |
+| `expires_at` | `TIMESTAMPTZ` | **NO** | — | Strict expiration timestamp (Tehran midnight of allowance date). |
+| `created_at` | `TIMESTAMPTZ` | **NO** | `now()` | Record creation timestamp. |
+| `updated_at` | `TIMESTAMPTZ` | **NO** | `now()` | Last consumption timestamp. |
 
 - **Dynamic Daily Allocation Architecture**:
   1. The daily quota is read from `system_configurations` (key: `'daily_free_quota'`), not hardcoded.
-  2. On a user's first interaction of a Tehran day, the system executes:
-     `INSERT INTO wallet_daily_allowances (user_id, allowance_date, allocated_credits, used_credits) VALUES (:uid, :today_tehran, :configured_quota, 0) ON CONFLICT (user_id, allowance_date) DO NOTHING;`
-  3. Because `(user_id, allowance_date)` is the `PRIMARY KEY`, concurrent requests or server restarts cannot allocate duplicate credits.
-  4. Unused credits expire automatically at Tehran midnight because queries only query for the current Tehran calendar date.
-  5. If an administrator updates `'daily_free_quota'`, the new quota applies to subsequent allocations. Existing rows for the current date are not retroactively modified, avoiding race conditions.
+  2. On a user's first interaction of a Tehran day, the system allocates the day's credits:
+     ```sql
+     INSERT INTO wallet_daily_allowances (user_id, allowance_date, allocated_credits, used_credits, expires_at)
+     VALUES (:uid, :today_tehran, :configured_quota, 0, :tehran_midnight_utc)
+     ON CONFLICT (user_id, allowance_date) DO NOTHING;
+     ```
+  3. `UNIQUE (user_id, allowance_date)` guarantees idempotency against concurrent messages or server restarts.
+  4. Unused credits expire automatically at Tehran midnight because operational queries only consider rows where `allowance_date = current_tehran_date()`.
+  5. Quota updates by Super Admins apply to subsequent daily allocations without retroactively altering current records.
 - **Constraints & Indexes**:
-  - `PRIMARY KEY (user_id, allowance_date)`
+  - `PRIMARY KEY (id)`
   - `FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT`
+  - `UNIQUE (user_id, allowance_date)`
   - `CHECK (allocated_credits >= 0)`
   - `CHECK (used_credits >= 0 AND used_credits <= allocated_credits)`
 
 #### Table: `wallet_ledgers`
-Append-only, immutable transaction journal. Every balance modification must produce corresponding ledger entries.
+Append-only, single-table transaction journal (not double-entry). Every balance modification must produce corresponding immutable ledger entries.
 
 | Column Name | PostgreSQL Type | Nullable | Default | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | `id` | `BIGINT GENERATED ALWAYS AS IDENTITY` | **NO** | *Sequence* | Primary key. |
 | `wallet_user_id` | `BIGINT` | **NO** | — | References `users(id)`. |
 | `idempotency_key` | `VARCHAR(128)` | **NO** | — | Unique deterministic key preventing duplicate debits/credits. |
-| `transaction_type` | `VARCHAR(30)` | **NO** | — | `'RANDOM_CHAT_FEE'`, `'DIRECT_CHAT_FEE'`, `'PURCHASE'`, `'ADMIN_GRANT'`, `'ADMIN_DEDUCTION'`, `'REFUND'`. |
-| `purchased_delta` | `INTEGER` | **NO** | `0` | Change in purchased coins (negative for debit). |
-| `free_delta` | `INTEGER` | **NO** | `0` | Change in daily free credits (negative for debit). |
-| `purchased_balance_after`| `INTEGER` | **NO** | — | Balance of purchased coins immediately after transaction. |
-| `free_balance_after` | `INTEGER` | **NO** | — | Balance of free credits immediately after transaction. |
-| `reference_id` | `VARCHAR(64)` | YES | `NULL` | Correlated identifier (e.g., `chat_session_id`, `payment_id`). |
+| `transaction_type` | `VARCHAR(30)` | **NO** | — | `'RANDOM_CHAT_FEE'`, `'DIRECT_CHAT_FEE'`, `'PURCHASE'`, `'DAILY_ALLOWANCE_GRANT'`, `'ADMIN_GRANT'`, `'ADMIN_DEDUCTION'`, `'REFUND'`. |
+| `credit_type` | `VARCHAR(20)` | **NO** | — | `'FREE'`, `'PURCHASED'`. |
+| `allowance_id` | `BIGINT` | YES | `NULL` | Foreign key references `wallet_daily_allowances(id)` ON DELETE RESTRICT. |
+| `allowance_date` | `DATE` | YES | `NULL` | Calendar date in `Asia/Tehran` for free credit operations. |
+| `amount` | `INTEGER` | **NO** | — | Signed transaction delta (negative for debit, positive for credit). |
+| `purchased_balance_before`| `INTEGER` | **NO** | — | Balance of purchased coins immediately before transaction. |
+| `purchased_balance_after` | `INTEGER` | **NO** | — | Balance of purchased coins immediately after transaction. |
+| `free_balance_before` | `INTEGER` | **NO** | — | Balance of active free credits immediately before transaction. |
+| `free_balance_after` | `INTEGER` | **NO** | — | Balance of active free credits immediately after transaction. |
+| `reference_id` | `VARCHAR(64)` | YES | `NULL` | Correlated identifier (e.g., `chat_session_id`, `purchase_id`). |
 | `actor_type` | `VARCHAR(20)` | **NO** | — | `'SYSTEM'`, `'USER'`, `'ADMIN'`. |
 | `actor_id` | `BIGINT` | YES | `NULL` | Admin ID if manual grant/deduction. |
 | `reason` | `TEXT` | **NO** | — | Human-readable transaction reason. |
 | `created_at` | `TIMESTAMPTZ` | **NO** | `now()` | Immutable creation timestamp. |
 
+- **Reconciliation, Lineage & Priority Rules**:
+  1. **Strict Traceability**: Any transaction with `credit_type = 'FREE'` must reference the exact `wallet_daily_allowances(id)` row and its `Asia/Tehran` calendar date via foreign key.
+  2. **Free-First Priority**: When a fee is charged (1 coin for random chat, 2 coins for direct chat):
+     - If the user has active free credits remaining (`wallet_daily_allowances.remaining_credits > 0`), free credits are debited first.
+     - Any remaining deficit is debited from `wallets.purchased_coins`.
+     - Separate ledger entries are created for each credit type if a fee spans both pools, ensuring complete mathematical clarity in balance snapshots.
+  3. **Same Transaction Boundary**: Updating `wallet_daily_allowances` (or `wallets`) and inserting into `wallet_ledgers` must occur within the **exact same database transaction**.
 - **Constraints & Indexes**:
   - `PRIMARY KEY (id)`
   - `FOREIGN KEY (wallet_user_id) REFERENCES users(id) ON DELETE RESTRICT`
+  - `FOREIGN KEY (allowance_id) REFERENCES wallet_daily_allowances(id) ON DELETE RESTRICT`
   - `FOREIGN KEY (actor_id) REFERENCES users(id) ON DELETE RESTRICT`
-  - `UNIQUE (idempotency_key)` *(Database guarantee against duplicate charging)*
-  - `CHECK (purchased_balance_after >= 0 AND free_balance_after >= 0)`
+  - `UNIQUE (idempotency_key)`
+  - `CHECK (credit_type IN ('FREE', 'PURCHASED'))`
+  - `CHECK (purchased_balance_before >= 0 AND purchased_balance_after >= 0)`
+  - `CHECK (free_balance_before >= 0 AND free_balance_after >= 0)`
+  - `CHECK ((credit_type = 'FREE' AND allowance_id IS NOT NULL AND allowance_date IS NOT NULL) OR (credit_type = 'PURCHASED' AND allowance_id IS NULL AND allowance_date IS NULL))`
   - `INDEX idx_wallet_ledgers_user (wallet_user_id, created_at DESC)`
+  - `INDEX idx_wallet_ledgers_allowance (allowance_id) WHERE allowance_id IS NOT NULL`
 
 ---
 
@@ -629,20 +754,20 @@ Durable key-value store for application parameters and business thresholds. Mana
 | `updated_by` | `BIGINT` | **NO** | — | References `users(id)` (Super Admin). |
 | `updated_at` | `TIMESTAMPTZ` | **NO** | `now()` | Timestamp of last modification. |
 
-- **Standard Configuration Keys**:
-  - `daily_free_quota`: Dynamic integer (e.g., `{"credits": 3}`).
-  - `random_chat_price`: Coin cost per participant (e.g., `{"price": 1}`).
-  - `direct_chat_price`: Coin cost for requester (e.g., `{"price": 2}`).
-  - `direct_request_expiry_hours`: Duration before request lapses (e.g., `{"hours": 24}`).
-  - `video_size_limit_bytes`: Video ceiling in bytes (e.g., `{"limit": 10485760}`).
-  - `message_retention_days`: Routine message retention ceiling (e.g., `{"days": 30}`).
-  - `coin_packages`: Catalog of purchasable coin packages.
-  - `rate_limits`: Anti-spam message and request frequency thresholds.
-  - `feature_flags`: Operational toggles (e.g., media types enabled, maintenance mode).
+- **Hard Upper Bounds Enforced by Database Constraint**:
+  Super Admins may configure limits below the approved maximums, but can never exceed them:
+  1. `video_size_limit_bytes`: Can never exceed $10{,}485{,}760\text{ bytes}$ (10 MB).
+  2. `message_retention_days`: Can never exceed 30 days.
+  3. `daily_free_quota`: Dynamic non-negative integer (no fixed quota assumption).
+  4. `random_chat_price`: Dynamic non-negative integer (standard: 1 coin).
+  5. `direct_chat_price`: Dynamic non-negative integer (standard: 2 coins).
 - **Constraints & Indexes**:
   - `PRIMARY KEY (key)`
   - `FOREIGN KEY (updated_by) REFERENCES users(id) ON DELETE RESTRICT`
-  - Every update writes an audit record to `admin_audit_logs`.
+  - `CHECK (key <> 'video_size_limit_bytes' OR (value->>'limit')::bigint <= 10485760)`
+  - `CHECK (key <> 'message_retention_days' OR (value->>'days')::integer <= 30)`
+  - `CHECK (key <> 'video_size_limit_bytes' OR (value->>'limit')::bigint > 0)`
+  - `CHECK (key <> 'message_retention_days' OR (value->>'days')::integer > 0)`
 
 ---
 
@@ -747,12 +872,23 @@ Tamper-resistant audit log capturing all sensitive administrative operations.
 
 ## 5. Wallet Settlement Architecture & Atomic Transaction Design
 
-### Flaws Identified in Initial Design
+### Settlement Invariants
 
-1. In version 1.0.0, `chat_sessions.is_charged` was marked `TRUE` prior to completing financial ledger operations. A crash or rollback would leave a chat marked as charged without corresponding ledger records.
-2. For random chats, debits for Participant 1 and Participant 2 were planned as separate transactions. If Participant 1 was debited and the system failed or Participant 2's debit rolled back, financial state was left unbalanced.
+1. **Conditional Trigger**: Charges occur **only after mutual participation** (`participant_one_sent_msg = TRUE AND participant_two_sent_msg = TRUE`).
+2. **Pricing Rules**:
+   - Random Chat: 1 coin per participant.
+   - Direct Chat: 2 coins to requester only (recipient pays 0 coins).
+3. **Free-First Priority**:
+   - The user's active `wallet_daily_allowances` row for `today_tehran` is inspected.
+   - Available free credits (`remaining_credits = allocated_credits - used_credits`) are consumed first.
+   - Any remaining balance required is debited from `wallets.purchased_coins`.
+4. **Deterministic Deadlock Prevention**:
+   - In random chats, two participants are billed. To prevent database deadlocks under concurrent events, locks are acquired in **strictly ascending user ID order**:
+     `u_min = min(participant_one_id, participant_two_id)`
+     `u_max = max(participant_one_id, participant_two_id)`
+5. **Atomic Execution**: All balance deductions, daily allowance updates, ledger insertions, and chat session state changes occur inside a **single database transaction**.
 
-### Corrected Atomic Settlement Workflow
+### Settlement Workflow Diagram
 
 ```
                              ┌───────────────────────────────────────┐
@@ -781,7 +917,7 @@ Tamper-resistant audit log capturing all sensitive administrative operations.
             │   ROLLBACK / NO-OP    │                   │ 2. Deterministic Row Lock Order:  │
             │  (Already settled or  │                   │    u_min = min(p1, p2)            │
             │   one-sided chatter)  │                   │    u_max = max(p1, p2)            │
-            └───────────────────────┘                   │    Lock wallets & allowances      │
+            └───────────────────────┘                   │    Lock allowances & wallets      │
                                                         │    ORDER BY user_id FOR UPDATE    │
                                                         └─────────────────┬─────────────────┘
                                                                           │
@@ -791,13 +927,18 @@ Tamper-resistant audit log capturing all sensitive administrative operations.
                                                         │    - Random: 1 coin each (p1, p2) │
                                                         │    - Direct: 2 coins (requester)  │
                                                         │    (Free credits consumed first)  │
+                                                        │    Update wallet_daily_allowances │
+                                                        │    and/or wallets.purchased_coins │
                                                         └─────────────────┬─────────────────┘
                                                                           │
                                                                           ▼
                                                         ┌───────────────────────────────────┐
                                                         │ 4. Insert Ledger Entries:         │
+                                                        │    wallet_ledgers (append-only)   │
                                                         │    Unique idempotency keys:       │
-                                                        │    chat_fee:random:{cid}:{uid}    │
+                                                        │    chat_fee:{type}:{cid}:{uid}:{t}│
+                                                        │    Credit type, allowance link &  │
+                                                        │    before/after balance snapshots │
                                                         └─────────────────┬─────────────────┘
                                                                           │
                                                                           ▼
@@ -813,11 +954,7 @@ Tamper-resistant audit log capturing all sensitive administrative operations.
                                                         └───────────────────────────────────┘
 ```
 
-### Deterministic Deadlock Prevention & Multi-Row Locking
-
-When two participants in a random chat trigger settlement simultaneously (e.g. near-simultaneous first messages from both sides), deadlocks could occur if locks were acquired in arbitrary order.
-
-The settlement algorithm enforces a **strictly deterministic ascending lock order**:
+### Deterministic Multi-Row Locking Implementation Pattern
 
 ```python
 # 1. Authoritative check on locked chat row
@@ -825,8 +962,10 @@ chat = await session.execute(
     select(ChatSession).where(ChatSession.id == chat_id).with_for_update()
 ).scalar_one()
 
-if chat.is_charged or not (chat.participant_one_sent_msg and chat.participant_two_sent_msg):
-    return  # Already settled or pending mutual message
+if chat.is_charged or not (
+    chat.participant_one_sent_msg and chat.participant_two_sent_msg
+):
+    return  # Already settled or pending mutual participation
 
 # 2. Identify billing targets
 if chat.chat_type == ChatType.RANDOM:
@@ -837,19 +976,7 @@ else:
     user_ids = [chat.participant_one_id]
     fee_per_user = {chat.participant_one_id: 2}
 
-# 3. Lock wallets in strict ascending user_id order
-wallets = (
-    await session.execute(
-        select(Wallet)
-        .where(Wallet.user_id.in_(user_ids))
-        .order_by(Wallet.user_id)
-        .with_for_update()
-    )
-    .scalars()
-    .all()
-)
-
-# 4. Lock daily allowances in strict ascending user_id order
+# 3. Lock daily allowances in strict ascending user_id order
 allowances = (
     await session.execute(
         select(WalletDailyAllowance)
@@ -863,13 +990,84 @@ allowances = (
     .scalars()
     .all()
 )
+allowance_map = {a.user_id: a for a in allowances}
+
+# 4. Lock wallets in strict ascending user_id order
+wallets = (
+    await session.execute(
+        select(Wallet)
+        .where(Wallet.user_id.in_(user_ids))
+        .order_by(Wallet.user_id)
+        .with_for_update()
+    )
+    .scalars()
+    .all()
+)
+wallet_map = {w.user_id: w for w in wallets}
+
+# 5. Process settlement for each billed user
+for uid in user_ids:
+    fee = fee_per_user[uid]
+    allowance = allowance_map.get(uid)
+    wallet = wallet_map[uid]
+
+    free_available = allowance.remaining_credits if allowance else 0
+    free_deduct = min(fee, free_available)
+    purchased_deduct = fee - free_deduct
+
+    # Snapshot balances before
+    f_before = free_available
+    p_before = wallet.purchased_coins
+
+    if free_deduct > 0:
+        allowance.used_credits += free_deduct
+        session.add(
+            WalletLedger(
+                wallet_user_id=uid,
+                idempotency_key=f"chat_fee:{chat.chat_type.lower()}:{chat.id}:{uid}:free",
+                transaction_type=f"{chat.chat_type}_CHAT_FEE",
+                credit_type="FREE",
+                allowance_id=allowance.id,
+                allowance_date=allowance.allowance_date,
+                amount=-free_deduct,
+                purchased_balance_before=p_before,
+                purchased_balance_after=p_before,
+                free_balance_before=f_before,
+                free_balance_after=f_before - free_deduct,
+                reference_id=str(chat.id),
+                actor_type="SYSTEM",
+                reason=f"{chat.chat_type.title()} chat mutual fee (daily free allowance)",
+            )
+        )
+        f_before -= free_deduct
+
+    if purchased_deduct > 0:
+        if wallet.purchased_coins < purchased_deduct:
+            raise InsufficientFundsError(f"User {uid} cannot cover fee.")
+        wallet.purchased_coins -= purchased_deduct
+        session.add(
+            WalletLedger(
+                wallet_user_id=uid,
+                idempotency_key=f"chat_fee:{chat.chat_type.lower()}:{chat.id}:{uid}:purchased",
+                transaction_type=f"{chat.chat_type}_CHAT_FEE",
+                credit_type="PURCHASED",
+                allowance_id=None,
+                allowance_date=None,
+                amount=-purchased_deduct,
+                purchased_balance_before=p_before,
+                purchased_balance_after=p_before - purchased_deduct,
+                free_balance_before=f_before,
+                free_balance_after=f_before,
+                reference_id=str(chat.id),
+                actor_type="SYSTEM",
+                reason=f"{chat.chat_type.title()} chat mutual fee (purchased coins)",
+            )
+        )
+
+# 6. Mark chat session as charged
+chat.is_charged = True
+chat.charged_at = datetime.now(timezone.utc)
 ```
-
-### Transaction Rollback Guarantee
-
-- If any participant's debit, ledger insert, or chat update fails, the **entire database transaction rolls back**.
-- Rollback guarantees that no participant is charged unilaterally, no orphaned ledger entries are created, and `chat_sessions.is_charged` remains `FALSE`.
-- Retried settlement operations use the deterministic `idempotency_key = f"chat_fee:{chat.chat_type.lower()}:{chat.id}:{user_id}"`. Duplicate events abort harmlessly on unique key collision.
 
 ---
 
@@ -877,26 +1075,39 @@ allowances = (
 
 1. **Telegram ID Concealment**:
    - `telegram_user_id` is indexed solely for incoming Telegram update dispatching.
-   - Handlers and public services operate with `User.id` (internal) and `User.public_id` (peer-facing).
+   - Handlers and public services operate exclusively with `User.id` (internal) and `User.public_id` (peer-facing).
    - Peer profile cards render only `public_id`, `display_name`, `gender`, calculated `age` (from `birth_date`), `city`, and `bio`.
 2. **Media Proxying & Disk Safety**:
    - Outgoing messages route through aiogram's `send_photo(chat_id, file_id)` or `send_video(chat_id, file_id)`.
    - Media bytes are streamed directly via Telegram servers; no local files are written to `/tmp` or persistent disk.
    - Video payloads of 10 MB or larger ($10{,}485{,}760\text{ bytes}$) are rejected at the handler level before reaching Telegram and are blocked by the database `CHECK (file_size_bytes < 10485760)` constraint.
-3. **Automated Ephemeral Retention & Evidence Holds**:
+3. **Automated Ephemeral Retention & Multi-Evidence Holds**:
    - `chat_messages` records feature an `expires_at` column set to `created_at + INTERVAL '30 days'`.
-   - Routine cleanup sweeps remove expired records:
-     `DELETE FROM chat_messages WHERE expires_at < now() AND is_under_evidence_hold = FALSE;`
-   - Active user reports place an evidence hold (`is_under_evidence_hold = TRUE`), preserving cited messages with access restricted strictly to assigned moderators.
-   - Upon resolution of the report, the evidence hold is released and the records are queued for immediate removal.
-4. **Privacy-Preserving Account Deletion**:
-   - Hard deletion (`DELETE FROM users`) is prohibited by `ON DELETE RESTRICT` foreign keys on `wallets`, `wallet_ledgers`, and `admin_audit_logs`, preventing the destruction of mandatory financial and audit records.
-   - Deletion is performed via **soft-deletion and cryptographic pseudonymization**:
-     - `users.status` is set to `'DELETED'`, and `users.deleted_at = now()`.
-     - `telegram_user_id` is scrambled/pseudonymized (e.g. set to a synthetic negated hash) so that if the user restarts the bot in the future, they register as an entirely new entity with no linkage to historical data.
-     - `user_profiles` PII is scrubbed (`display_name = 'Deleted User'`, `bio = NULL`, `city = NULL`, `visibility = 'HIDDEN'`).
-     - Active chat participations are purged, and pending direct requests are canceled.
-     - Financial ledgers remain preserved with `wallet_user_id` intact for tax, legal, and financial audit reconciliation.
+   - Normal retention is capped at 30 days.
+   - User reports place independent holds in `message_evidence_holds`.
+   - Resolving one report releases only its own hold. Records are scrubbed only after the final active hold is resolved:
+     ```sql
+     DELETE FROM chat_messages m
+     WHERE m.expires_at < now()
+       AND NOT EXISTS (
+         SELECT 1 FROM message_evidence_holds h
+         WHERE h.message_id = m.id AND h.status = 'ACTIVE'
+       );
+     ```
+4. **Non-Reversible Cryptographic Account Deletion Pseudonymization**:
+   - Hard deletion (`DELETE FROM users`) is prevented by `ON DELETE RESTRICT` foreign keys on `wallets`, `wallet_ledgers`, `wallet_daily_allowances`, and `admin_audit_logs`.
+   - When a user deletes their account:
+     1. `users.status` is set to `'DELETED'`, and `users.deleted_at = now()`.
+     2. **Cryptographically Random Surrogate Identifier**: `telegram_user_id` is replaced with a randomly generated, cryptographically strong, non-reversible negative surrogate identifier (drawn from a uniform random 63-bit negative integer space):
+        ```python
+        # Fully severs mathematical and cryptographic correlation with the original Telegram ID
+        pseudo_id = -int.from_bytes(secrets.token_bytes(8), "big") & 0x7FFFFFFFFFFFFFFF
+        ```
+        This completely eliminates the original Telegram ID from storage without using a plain hash, while satisfying `UNIQUE (telegram_user_id)` and maintaining database integrity.
+     3. `users.public_id` is tombstoned to prevent direct link access.
+     4. `user_profiles` PII is scrubbed (`display_name = 'Deleted Account'`, `bio = NULL`, `city = NULL`, `visibility = 'HIDDEN'`).
+     5. Active chat participations (`active_chat_participants`) are immediately purged, and all pending `direct_requests` are marked `'CANCELLED'`.
+     6. **Returning Telegram User Flow**: If the Telegram user returns and restarts the bot in the future, looking up their genuine Telegram ID yields no active or existing account. The user is registered as a completely new, clean account (`users.id = new sequence`) with 0 balance, a new public ID, and no connection or attribution to the deleted account.
 
 ---
 
@@ -911,16 +1122,34 @@ The schema uses native PostgreSQL constraints to guarantee core domain invariant
    - `chat_sessions`: `CHECK (participant_one_id <> participant_two_id)`
    - `user_blocks`: `CHECK (blocker_id <> blocked_id)`
    - `reports`: `CHECK (reporter_id <> reported_user_id)`
+   - `user_connections`: `CHECK (user_id <> connected_user_id)`
 3. **Strict Video Size Ceiling**:
    `chat_messages`: `CHECK (message_type <> 'VIDEO' OR file_size_bytes < 10485760)` strictly enforces rejection of video payloads at or above 10 MB.
-4. **Non-Negative Balances**:
+4. **Hard Upper Bound on Configuration Parameters**:
+   `system_configurations`:
+   - `CHECK (key <> 'video_size_limit_bytes' OR (value->>'limit')::bigint <= 10485760)`
+   - `CHECK (key <> 'message_retention_days' OR (value->>'days')::integer <= 30)`
+5. **Strict Message Retention Ceiling**:
+   `chat_messages`: `CHECK (expires_at <= created_at + INTERVAL '30 days')` guarantees that routine message records cannot be scheduled for retention beyond 30 days.
+6. **Age Eligibility and Profile Creation Guard**:
+   - `users`: `CHECK ((age_18_plus_declared = FALSE AND age_declared_at IS NULL) OR (age_18_plus_declared = TRUE AND age_declared_at IS NOT NULL))`
+   - `users`: `CHECK (age_declared_at IS NULL OR age_declared_at >= created_at)`
+   - `user_profiles`: `FOREIGN KEY (user_id, age_18_plus_declared) REFERENCES users(id, age_18_plus_declared) ON DELETE RESTRICT`
+   - `user_profiles`: `CHECK (age_18_plus_declared = TRUE)`
+   - `user_profiles`: `CHECK (birth_date <= (registration_date - INTERVAL '18 years'))`
+7. **Cascade Protection on Evidence Holds**:
+   - `chat_messages`: `FOREIGN KEY (chat_id) REFERENCES chat_sessions(id) ON DELETE RESTRICT`
+   - `message_evidence_holds`: `FOREIGN KEY (message_id) REFERENCES chat_messages(id) ON DELETE RESTRICT`
+   - `message_evidence_holds`: `FOREIGN KEY (report_id) REFERENCES reports(id) ON DELETE RESTRICT`
+8. **Non-Negative Balances & Strict Allowance Bounds**:
    - `wallets`: `CHECK (purchased_coins >= 0)`
+   - `wallet_daily_allowances`: `CHECK (allocated_credits >= 0)`
    - `wallet_daily_allowances`: `CHECK (used_credits >= 0 AND used_credits <= allocated_credits)`
-   - `wallet_ledgers`: `CHECK (purchased_balance_after >= 0 AND free_balance_after >= 0)`
-5. **No Double-Charging**:
-   `wallet_ledgers`: `UNIQUE (idempotency_key)` guarantees that duplicate settlement events fail immediately with a unique constraint violation.
-6. **Immutable Historical Registration Date Check**:
-   `user_profiles`: `CHECK (birth_date <= (created_at::date - INTERVAL '18 years'))` enforces that declared birth dates cannot violate the 18+ threshold relative to the immutable registration date.
+   - `wallet_ledgers`: `CHECK (purchased_balance_before >= 0 AND purchased_balance_after >= 0)`
+   - `wallet_ledgers`: `CHECK (free_balance_before >= 0 AND free_balance_after >= 0)`
+9. **Ledger Lineage and Traceability Invariants**:
+   - `wallet_ledgers`: `UNIQUE (idempotency_key)` guarantees duplicate transactions fail immediately.
+   - `wallet_ledgers`: `CHECK ((credit_type = 'FREE' AND allowance_id IS NOT NULL AND allowance_date IS NOT NULL) OR (credit_type = 'PURCHASED' AND allowance_id IS NULL AND allowance_date IS NULL))`
 
 ---
 
@@ -932,7 +1161,7 @@ The following genuine business decisions remain open and are documented for arch
 - **Context**: Because chats are billed conditionally after mutual message exchange, a participant who had sufficient balance when entering the chat might have 0 free credits and 0 purchased coins when settlement executes (e.g., if credits were consumed concurrently in another interaction, or expired at Tehran midnight during the conversation).
 - **Options & Technical Consequences**:
   - *Option A (Overdraft / Negative Balance)*: Deduct the coin anyway, allowing `purchased_coins` to become negative (`-1`).  
-    *Consequence*: Requires removing `CHECK (purchased_coins >= 0)`. Creates financial risk if bad actors cycle disposable Telegram accounts to obtain free chats.
+    *Consequence*: Requires removing `CHECK (purchased_coins >= 0)`. Creates financial risk if bad actors cycle disposable accounts to obtain free chats.
   - *Option B (Immediate Termination & Strike)*: Abort the chat session immediately (`end_reason = 'INSUFFICIENT_FUNDS'`), terminate routing, and issue a non-punitive warning.  
     *Consequence*: Abruptly interrupts an active conversation for both participants; partner experience suffers through no fault of their own.
   - *Option C (Forgiveness on First Occurrence)*: Waive the fee for that specific session, mark `is_charged = TRUE` with 0 delta, and flag the user's account requiring a deposit before any new chat can be joined.  
@@ -948,10 +1177,10 @@ The following genuine business decisions remain open and are documented for arch
   - *Option B*: Dispatch a discreet Telegram notification to the requester ("Your request to User X has expired").
 - **Status**: **UNRESOLVED**.
 
-### 3. Statutory Legal Archival & Account-Deletion Schedules
+### 3. Statutory Legal Archival & Account-Deletion Retention Schedules
 - **Context**: Soft-deletion preserves financial ledger records indefinitely for auditability.
 - **Options**:
-  - Establish a formal 5-year or 7-year statutory financial purge schedule vs. permanent immutable ledger retention.
+  - Establish a formal statutory financial purge schedule (e.g., 5-year or 7-year cold storage archival) vs. permanent immutable ledger retention.
 - **Status**: **UNRESOLVED**.
 
 ### 4. Promotional Campaign Voucher Accounting
