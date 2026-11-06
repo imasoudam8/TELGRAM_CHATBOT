@@ -25,7 +25,7 @@ The Anonymous Telegram Matching & Chat Bot is engineered as a **Modular Monolith
    - **PostgreSQL 16**: Authoritative persistent system of record for user accounts, profiles, matching preferences, permanent connections, blocks, chat sessions, message metadata, normalized evidence holds, audit logs, reports, dynamic configuration, and the immutable financial ledger.
    - **Redis 7**: Ephemeral matchmaking queues, active waiting pools, live typing indicators, distributed concurrency locks, rate limits, and finite state machine (FSM) conversational wizard state.
 3. **Single-Table Append-Only Financial Ledger & Traceable Allowances**:
-   - The ledger (`wallet_ledgers`) is an append-only transaction journal (not double-entry). Immutability is enforced at the database schema level via trigger (`trg_wallet_ledgers_append_only`) rejecting any `UPDATE` or `DELETE`. Balance changes require row-level locking (`SELECT ... FOR UPDATE`) within ACID transactions, accompanied by immutable journal entries carrying unique idempotency keys.
+   - The ledger (`wallet_ledgers`) is an append-only transaction journal (not double-entry). Immutability is enforced at the database row level via trigger (`trg_wallet_ledgers_append_only`) rejecting ordinary `UPDATE` or `DELETE` statements, reinforced by role privilege boundaries (`REVOKE UPDATE, DELETE, TRUNCATE FROM app_user`) to prohibit truncation. Balance changes require row-level locking (`SELECT ... FOR UPDATE`) within ACID transactions, accompanied by immutable journal entries carrying unique idempotency keys.
    - Every transaction consuming or modifying daily free credits is strictly traceable to the exact `wallet_daily_allowances` record via a composite foreign key referencing `(allowance_id, wallet_user_id, allowance_date)`.
    - Free credits are consumed before purchased credits.
    - Daily free credits expire strictly at midnight in the `Asia/Tehran` timezone without carryover. Purchased credits never expire.
@@ -911,8 +911,8 @@ Normalized evidence-hold relationship supporting multiple concurrent reports and
            SELECT id 
            FROM chat_messages
            WHERE expires_at < now()
-           FOR UPDATE SKIP LOCKED -- Concurrency-safe queue pattern avoiding lock contention
            LIMIT 1000             -- Controlled batch processing
+           FOR UPDATE SKIP LOCKED -- Concurrency-safe queue pattern avoiding lock contention
        )
        DELETE FROM chat_messages m
        USING scrub_candidates c
@@ -1029,20 +1029,29 @@ Append-only, single-table transaction journal (not double-entry). Every balance 
   1. **Strict Composite Lineage**: Any transaction with `credit_type = 'FREE'` must reference the exact allowance via composite foreign key `FOREIGN KEY (allowance_id, wallet_user_id, allowance_date) REFERENCES wallet_daily_allowances(id, user_id, allowance_date) ON DELETE RESTRICT`. This guarantees at the database engine level that allowance ownership and dates cannot desynchronize.
   2. **Free-First Priority**: When a fee is charged, active free credits are consumed before purchased coins.
   3. **Same Transaction Boundary**: Allowance updates and ledger entries execute within the **exact same database transaction**.
-  4. **Strict Append-Only Immutability Guard (`trg_wallet_ledgers_append_only`)**:
-     To guarantee that financial journal records cannot be forged, manipulated, or expunged, a database trigger prohibits `UPDATE` and `DELETE` operations:
-     ```sql
-     CREATE OR REPLACE FUNCTION trg_wallet_ledgers_immutability()
-     RETURNS TRIGGER AS $$
-     BEGIN
-         RAISE EXCEPTION 'wallet_ledgers is strictly append-only. UPDATE and DELETE operations are prohibited.';
-     END;
-     $$ LANGUAGE plpgsql;
+  4. **Strict Append-Only Immutability Guard & Database Privilege Boundary**:
+     - **Row-Level Trigger Enforcement**: A PostgreSQL `BEFORE UPDATE OR DELETE` trigger on `wallet_ledgers` intercepts and rejects all ordinary DML `UPDATE` and `DELETE` statements originating from application handlers, matchers, or administrative tools:
+       ```sql
+       CREATE OR REPLACE FUNCTION trg_wallet_ledgers_immutability()
+       RETURNS TRIGGER AS $$
+       BEGIN
+           RAISE EXCEPTION 'wallet_ledgers is strictly append-only. UPDATE and DELETE operations are prohibited.';
+       END;
+       $$ LANGUAGE plpgsql;
 
-     CREATE TRIGGER trg_wallet_ledgers_append_only
-     BEFORE UPDATE OR DELETE ON wallet_ledgers
-     FOR EACH ROW EXECUTE FUNCTION trg_wallet_ledgers_immutability();
-     ```
+       CREATE TRIGGER trg_wallet_ledgers_append_only
+       BEFORE UPDATE OR DELETE ON wallet_ledgers
+       FOR EACH ROW EXECUTE FUNCTION trg_wallet_ledgers_immutability();
+       ```
+     - **Database Privilege Boundary & Role Security**:
+       - Row-level triggers prevent ordinary DML `UPDATE` and `DELETE` operations, but do not independently prevent table-level `TRUNCATE` operations (which bypass row triggers) or privileged trigger disabling by table owners or superusers (`ALTER TABLE ... DISABLE TRIGGER`).
+       - To establish an effective defense-in-depth security boundary:
+         1. **Application Runtime Role (`app_user`)**: The runtime database role used by the bot backend connection pool must be granted strictly `SELECT` and `INSERT` permissions on `wallet_ledgers`. Table truncation, deletion, and update permissions must be explicitly revoked:
+            ```sql
+            REVOKE UPDATE, DELETE, TRUNCATE ON wallet_ledgers FROM app_user;
+            ```
+         2. **Migration & DDL Role (`migration_admin`)**: Table ownership, schema migrations, and trigger definitions are restricted exclusively to a dedicated migration role executed only during deployment pipelines.
+         3. **Superuser Boundary**: Triggers and role permissions protect against application bugs, rogue queries, and non-superuser operators. Protection against PostgreSQL superusers is not claimed at the database trigger layer and must be governed through external infrastructure-level IAM, bastion access policies, and audit logging.
 - **Constraints & Indexes**:
   - `PRIMARY KEY (id)`
   - `FOREIGN KEY (wallet_user_id) REFERENCES users(id) ON DELETE RESTRICT`
@@ -1197,20 +1206,30 @@ Tamper-resistant audit log capturing all sensitive administrative operations.
 | `reason` | `TEXT` | **NO** | — | Mandatory administrative justification. |
 | `created_at` | `TIMESTAMPTZ` | **NO** | `now()` | Execution timestamp. |
 
-- **Tamper-Resistance & Append-Only Architecture (`trg_admin_audit_logs_append_only`)**:
-  To guarantee that operational audit records and security traces cannot be altered or removed even by administrative database users, a database trigger prohibits `UPDATE` and `DELETE` operations:
-  ```sql
-  CREATE OR REPLACE FUNCTION trg_admin_audit_logs_immutability()
-  RETURNS TRIGGER AS $$
-  BEGIN
-      RAISE EXCEPTION 'admin_audit_logs is strictly append-only. UPDATE and DELETE operations are prohibited.';
-  END;
-  $$ LANGUAGE plpgsql;
+- **Tamper-Resistance, Append-Only Architecture & Database Privilege Boundary**:
+  - **Row-Level Trigger Enforcement (`trg_admin_audit_logs_append_only`)**:
+    To guarantee that operational audit records and security traces cannot be altered or removed through application workflows or standard administrative queries, a database trigger prohibits `UPDATE` and `DELETE` operations:
+    ```sql
+    CREATE OR REPLACE FUNCTION trg_admin_audit_logs_immutability()
+    RETURNS TRIGGER AS $$
+    BEGIN
+        RAISE EXCEPTION 'admin_audit_logs is strictly append-only. UPDATE and DELETE operations are prohibited.';
+    END;
+    $$ LANGUAGE plpgsql;
 
-  CREATE TRIGGER trg_admin_audit_logs_append_only
-  BEFORE UPDATE OR DELETE ON admin_audit_logs
-  FOR EACH ROW EXECUTE FUNCTION trg_admin_audit_logs_immutability();
-  ```
+    CREATE TRIGGER trg_admin_audit_logs_append_only
+    BEFORE UPDATE OR DELETE ON admin_audit_logs
+    FOR EACH ROW EXECUTE FUNCTION trg_admin_audit_logs_immutability();
+    ```
+  - **Database Privilege Boundary & Role Security**:
+    - Row-level triggers prevent ordinary DML `UPDATE` and `DELETE` operations, but do not independently prevent table-level `TRUNCATE` operations (which bypass row triggers) or privileged trigger disabling by table owners or superusers (`ALTER TABLE ... DISABLE TRIGGER`).
+    - To establish an effective defense-in-depth security boundary:
+      1. **Application Runtime Role (`app_user`)**: The runtime database role used by the bot and administrative panel backend must be granted strictly `SELECT` and `INSERT` permissions on `admin_audit_logs`. Table truncation, deletion, and update permissions must be explicitly revoked:
+         ```sql
+         REVOKE UPDATE, DELETE, TRUNCATE ON admin_audit_logs FROM app_user;
+         ```
+      2. **Migration & DDL Role (`migration_admin`)**: Table ownership, schema migrations, and trigger definitions are restricted exclusively to a dedicated migration role executed only during deployment pipelines.
+      3. **Superuser Boundary**: Triggers and role permissions protect against application bugs, rogue queries, and non-superuser operators. Protection against PostgreSQL superusers is not claimed at the database trigger layer and must be governed through external infrastructure-level IAM, bastion access policies, and audit logging.
 - **Constraints & Indexes**:
   - `PRIMARY KEY (id)`
   - `FOREIGN KEY (admin_user_id) REFERENCES users(id) ON DELETE RESTRICT`
@@ -1502,8 +1521,8 @@ The schema uses native PostgreSQL constraints to guarantee core domain invariant
 11. **Chat Message Immutability & Anti-Tamper Guard**:
     - `chat_messages`: Database trigger `trg_chat_messages_guard` strictly prohibits updating `id`, `chat_id`, `sender_id`, `recipient_id`, `created_at`, `message_type`, `content_hash`, `telegram_file_id`, `file_size_bytes`, or `duration_seconds` using NULL-safe `IS DISTINCT FROM` comparisons, preventing moving messages between chat sessions or altering cryptographic fingerprints. Retention expiration cannot be extended beyond initial ceiling.
 12. **Strict Append-Only Financial Ledger & Tamper-Proof Audit Trail**:
-    - `wallet_ledgers`: Database trigger `trg_wallet_ledgers_append_only` strictly prohibits `UPDATE` and `DELETE` operations at the engine level.
-    - `admin_audit_logs`: Database trigger `trg_admin_audit_logs_append_only` strictly prohibits `UPDATE` and `DELETE` operations at the engine level.
+    - `wallet_ledgers`: Database trigger `trg_wallet_ledgers_append_only` strictly prohibits ordinary `UPDATE` and `DELETE` operations at the row level. Table-level `TRUNCATE` operations are barred by role privileges (`REVOKE UPDATE, DELETE, TRUNCATE FROM app_user`). Superuser bypass is not claimed at the database trigger layer and is governed by IAM/bastion policies.
+    - `admin_audit_logs`: Database trigger `trg_admin_audit_logs_append_only` strictly prohibits ordinary `UPDATE` and `DELETE` operations at the row level. Table-level `TRUNCATE` operations are barred by role privileges (`REVOKE UPDATE, DELETE, TRUNCATE FROM app_user`). Superuser bypass is not claimed at the database trigger layer and is governed by IAM/bastion policies.
 13. **Concurrency-Safe Evidence Preservation & Retention Scrubbing**:
     - Evidence hold creation transactions acquire a shared row lock (`SELECT ... FOR SHARE`) on `chat_messages`, blocking concurrent deletion.
     - Routine message scrubbing executes via batch queries with `FOR UPDATE SKIP LOCKED` and deletes messages only where `NOT EXISTS (SELECT 1 FROM message_evidence_holds WHERE status = 'ACTIVE')`, mathematically eliminating race conditions between hold placement and routine retention scrubbing.
