@@ -277,19 +277,21 @@ async def test_live_postgres_alembic_migration_lifecycle(
 
             # Attempt invalid UPDATE on append-only wallet_ledgers
             with pytest.raises(Exception) as exc_info:
-                await conn.execute(
-                    text(
-                        "UPDATE wallet_ledgers SET reason = 'Modified reason' "
-                        f"WHERE wallet_user_id = {user_id};"
+                async with conn.begin_nested():
+                    await conn.execute(
+                        text(
+                            "UPDATE wallet_ledgers SET reason = 'Modified reason' "
+                            f"WHERE wallet_user_id = {user_id};"
+                        )
                     )
-                )
             assert "append-only" in str(exc_info.value).lower()
 
             # Attempt invalid DELETE on append-only wallet_ledgers
             with pytest.raises(Exception) as exc_info:
-                await conn.execute(
-                    text(f"DELETE FROM wallet_ledgers WHERE wallet_user_id = {user_id};")
-                )
+                async with conn.begin_nested():
+                    await conn.execute(
+                        text(f"DELETE FROM wallet_ledgers WHERE wallet_user_id = {user_id};")
+                    )
             assert "append-only" in str(exc_info.value).lower()
 
         await test_engine.dispose()
