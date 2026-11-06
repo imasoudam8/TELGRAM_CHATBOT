@@ -1,7 +1,7 @@
 # Database Architecture & Core Domain Data Model Specification
 
-**Document Version:** 1.6.0  
-**Phase:** Database Architecture Integrity & Final Sign-off (TASK 002.6)  
+**Document Version:** 1.7.0  
+**Phase:** Database Architecture Final Audit & Sign-off Closure (TASK 002.7)  
 **Target Engine:** PostgreSQL 16  
 **ORM / Data Layer:** SQLAlchemy 2.x (Async) & Alembic  
 **Caching & Ephemeral Layer:** Redis 7 (Async via `redis.asyncio`)  
@@ -20,12 +20,12 @@ The Anonymous Telegram Matching & Chat Bot is engineered as a **Modular Monolith
    - Every user possesses an immutable, non-sequential alphanumeric `public_id` (e.g., `usr_7k9x2m4p8q1v`). Peer interactions, direct link requests, and profile exchanges reference `public_id` exclusively.
    - Phone numbers are never requested, ingested, or stored.
    - User identity verification badges do not exist. Users explicitly self-declare adult eligibility ($\ge 18$) upon registration (`age_18_plus_declared`).
-   - Authoritative declaration timestamp `users.age_declared_at` is generated **exclusively by the database engine clock** (`clock_timestamp()`) upon the first transition to `age_18_plus_declared = TRUE`. Any caller-supplied timestamp is discarded on both `INSERT` and `UPDATE`. `users.age_declared_date` is derived exclusively from this database-generated timestamp in `Asia/Tehran`. A composite foreign key `(user_id, age_18_plus_declared, age_declared_date)` on `user_profiles` physically prevents profile creation for undeclared users and ensures zero contradiction. Database triggers enforce permanent immutability, preventing backdated, future-dated, or fabricated declarations from bypassing age eligibility checks.
+   - Authoritative declaration timestamp `users.age_declared_at` is generated **exclusively by the database engine clock** (`clock_timestamp()`) upon the first transition to `age_18_plus_declared = TRUE`. Any caller-supplied timestamp is discarded on both `INSERT` and `UPDATE`. `users.age_declared_date` is derived exclusively from this database-generated timestamp in `Asia/Tehran`. A composite foreign key `(user_id, age_18_plus_declared, age_declared_date)` on `user_profiles` physically prevents profile creation for undeclared users and ensures zero contradiction. Database triggers with strict NULL-safe comparisons (`IS DISTINCT FROM`) enforce permanent immutability, preventing backdated, future-dated, or fabricated declarations from bypassing age eligibility checks.
 2. **Clear Responsibility Boundary: PostgreSQL vs. Redis**:
    - **PostgreSQL 16**: Authoritative persistent system of record for user accounts, profiles, matching preferences, permanent connections, blocks, chat sessions, message metadata, normalized evidence holds, audit logs, reports, dynamic configuration, and the immutable financial ledger.
    - **Redis 7**: Ephemeral matchmaking queues, active waiting pools, live typing indicators, distributed concurrency locks, rate limits, and finite state machine (FSM) conversational wizard state.
 3. **Single-Table Append-Only Financial Ledger & Traceable Allowances**:
-   - The ledger (`wallet_ledgers`) is an append-only transaction journal (not double-entry). Balance changes require row-level locking (`SELECT ... FOR UPDATE`) within ACID transactions, accompanied by immutable journal entries carrying unique idempotency keys.
+   - The ledger (`wallet_ledgers`) is an append-only transaction journal (not double-entry). Immutability is enforced at the database schema level via trigger (`trg_wallet_ledgers_append_only`) rejecting any `UPDATE` or `DELETE`. Balance changes require row-level locking (`SELECT ... FOR UPDATE`) within ACID transactions, accompanied by immutable journal entries carrying unique idempotency keys.
    - Every transaction consuming or modifying daily free credits is strictly traceable to the exact `wallet_daily_allowances` record via a composite foreign key referencing `(allowance_id, wallet_user_id, allowance_date)`.
    - Free credits are consumed before purchased credits.
    - Daily free credits expire strictly at midnight in the `Asia/Tehran` timezone without carryover. Purchased credits never expire.
@@ -45,8 +45,10 @@ The Anonymous Telegram Matching & Chat Bot is engineered as a **Modular Monolith
    - Video payloads of 10 MB or larger ($10{,}485{,}760\text{ bytes}$) must always be rejected. Application validation and database schema constraints strictly enforce a less-than comparison (`file_size_bytes < 10485760`).
 6. **Bounded Message Retention, Session-Consistent Evidence Holds & Audit Preservation**:
    - Routine message text and media metadata have a maximum normal retention period of **30 days** (`expires_at = created_at + INTERVAL '30 days'`).
+   - Message records (`chat_messages`) are strictly protected against post-creation tampering via database trigger (`trg_chat_messages_guard`), preventing moving messages between chat sessions, rewriting sender/recipient identities, or modifying cryptographic content hashes.
    - A message may be placed under hold by multiple independent reports or legal orders via a normalized `message_evidence_holds` junction entity.
    - The database guarantees cross-table session consistency via database trigger (`trg_message_evidence_holds_guard`), physically rejecting any evidence hold where the cited message does not belong to the cited `chat_session_id`.
+   - Concurrency safety between hold creation and routine retention scrubbing is guaranteed via database row locking (`FOR SHARE` during hold creation and `FOR UPDATE SKIP LOCKED` during retention scrubbing).
    - Resolving one report releases only its own hold; message content is eligible for routine scrubbing only after all active holds are released.
    - Every hold and hold release enforces verifiable actor attribution (human admin or explicit system actor identifier) and mandatory justification.
    - Legal holds without user reports are fully supported and retain stable legal order references (`legal_reference_id`).
@@ -377,7 +379,7 @@ Represents the root identity record. Contains authentication routing metadata, a
          v_db_clock TIMESTAMPTZ := clock_timestamp(); -- Authoritative real-time database wall-clock
      BEGIN
          IF TG_OP = 'INSERT' THEN
-             IF NEW.age_18_plus_declared = TRUE THEN
+             IF NEW.age_18_plus_declared IS TRUE THEN
                  -- Unconditionally assign database clock; discard any caller-supplied timestamp
                  NEW.age_declared_at := v_db_clock;
                  NEW.age_declared_date := (v_db_clock AT TIME ZONE 'Asia/Tehran')::date;
@@ -389,17 +391,16 @@ Represents the root identity record. Contains authentication routing metadata, a
 
          ELSIF TG_OP = 'UPDATE' THEN
              -- Case 1: First-time transition from undeclared to declared
-             IF (OLD.age_18_plus_declared IS FALSE OR OLD.age_18_plus_declared IS NULL) 
-                AND NEW.age_18_plus_declared = TRUE THEN
+             IF OLD.age_18_plus_declared IS NOT TRUE AND NEW.age_18_plus_declared IS TRUE THEN
                  -- Unconditionally assign database clock; prevent caller from fabricating declaration time
                  NEW.age_declared_at := v_db_clock;
                  NEW.age_declared_date := (v_db_clock AT TIME ZONE 'Asia/Tehran')::date;
 
-             -- Case 2: Established declaration cannot be modified, backdated, or revoked
-             ELSIF OLD.age_18_plus_declared = TRUE THEN
-                 IF NEW.age_18_plus_declared <> TRUE OR 
-                    NEW.age_declared_at <> OLD.age_declared_at OR 
-                    NEW.age_declared_date <> OLD.age_declared_date THEN
+             -- Case 2: Established declaration cannot be modified, backdated, or revoked (Strict NULL-safe comparison)
+             ELSIF OLD.age_18_plus_declared IS TRUE THEN
+                 IF NEW.age_18_plus_declared IS DISTINCT FROM TRUE OR 
+                    NEW.age_declared_at IS DISTINCT FROM OLD.age_declared_at OR 
+                    NEW.age_declared_date IS DISTINCT FROM OLD.age_declared_date THEN
                      RAISE EXCEPTION 'Adult age declaration, declaration timestamp, and declaration date are permanent and immutable.';
                  END IF;
 
@@ -457,15 +458,15 @@ Public profile attributes presented during anonymous peer discovery. Profile cre
      - The profile's `age_declared_date` is guaranteed to match `users.age_declared_date` (which is derived from `users.age_declared_at` in `Asia/Tehran`).
      - Neither representation can contradict the other.
   2. **Intra-Table Age Check**: `CHECK (birth_date <= (age_declared_date - INTERVAL '18 years'))` enforces that the declared birth date satisfies the adult eligibility requirement relative to the exact declaration date. Non-immutable functions (`CURRENT_DATE`) are avoided completely.
-  3. **Profile Immutability Trigger**:
+  3. **Profile Immutability Trigger (Strict NULL-Safe Comparison)**:
      ```sql
      CREATE OR REPLACE FUNCTION trg_user_profiles_age_immutability()
      RETURNS TRIGGER AS $$
      BEGIN
-         IF NEW.age_declared_date <> OLD.age_declared_date THEN
+         IF NEW.age_declared_date IS DISTINCT FROM OLD.age_declared_date THEN
              RAISE EXCEPTION 'age_declared_date is immutable once established.';
          END IF;
-         IF NEW.age_18_plus_declared <> OLD.age_18_plus_declared THEN
+         IF NEW.age_18_plus_declared IS DISTINCT FROM OLD.age_18_plus_declared THEN
              RAISE EXCEPTION 'age_18_plus_declared cannot be modified.';
          END IF;
          RETURN NEW;
@@ -652,11 +653,11 @@ Captures session lifecycle, participation records, charging status, and terminat
      RETURNS TRIGGER AS $$
      BEGIN
          -- 1. Strictly immutable core identity fields across all session types
-         IF NEW.id <> OLD.id OR
-            NEW.chat_type <> OLD.chat_type OR
-            NEW.participant_one_id <> OLD.participant_one_id OR
-            NEW.participant_two_id <> OLD.participant_two_id OR
-            NEW.created_at <> OLD.created_at THEN
+         IF NEW.id IS DISTINCT FROM OLD.id OR
+            NEW.chat_type IS DISTINCT FROM OLD.chat_type OR
+            NEW.participant_one_id IS DISTINCT FROM OLD.participant_one_id OR
+            NEW.participant_two_id IS DISTINCT FROM OLD.participant_two_id OR
+            NEW.created_at IS DISTINCT FROM OLD.created_at THEN
              RAISE EXCEPTION 'Chat session core identifiers, type, participants, and creation timestamp are immutable.';
          END IF;
 
@@ -742,12 +743,44 @@ Stores message metadata, retention deadlines, and Telegram media identifiers wit
 | `created_at` | `TIMESTAMPTZ` | **NO** | `now()` | UTC dispatch timestamp. |
 | `expires_at` | `TIMESTAMPTZ` | **NO** | — | Normal retention deadline (`created_at + INTERVAL '30 days'`). |
 
-- **Retention & Hard Bound Rules**:
+- **Retention & Immutability Architecture**:
   1. Routine message retention is strictly capped at a maximum of 30 days:
      `CHECK (expires_at <= created_at + INTERVAL '30 days')`.
   2. Videos at or above 10 MB ($10{,}485{,}760\text{ bytes}$) must always be rejected:
      `CHECK (message_type <> 'VIDEO' OR file_size_bytes < 10485760)`.
   3. `FOREIGN KEY (chat_id) REFERENCES chat_sessions(id) ON DELETE RESTRICT` ensures that deleting a chat session cannot cascade-delete messages while message rows or evidence holds exist.
+  4. **Post-Creation Immutability Guard (`trg_chat_messages_guard`)**:
+     To guarantee that a message cited in an evidence hold cannot be moved to another chat session, have its participants rewritten, or have its cryptographic content hash altered, a PostgreSQL `BEFORE UPDATE` trigger strictly locks all message payload and routing attributes:
+     ```sql
+     CREATE OR REPLACE FUNCTION trg_chat_messages_immutability()
+     RETURNS TRIGGER AS $$
+     BEGIN
+         IF NEW.id IS DISTINCT FROM OLD.id OR
+            NEW.chat_id IS DISTINCT FROM OLD.chat_id OR
+            NEW.sender_id IS DISTINCT FROM OLD.sender_id OR
+            NEW.recipient_id IS DISTINCT FROM OLD.recipient_id OR
+            NEW.created_at IS DISTINCT FROM OLD.created_at OR
+            NEW.message_type IS DISTINCT FROM OLD.message_type OR
+            NEW.content_hash IS DISTINCT FROM OLD.content_hash OR
+            NEW.telegram_file_id IS DISTINCT FROM OLD.telegram_file_id OR
+            NEW.file_size_bytes IS DISTINCT FROM OLD.file_size_bytes OR
+            NEW.duration_seconds IS DISTINCT FROM OLD.duration_seconds THEN
+             RAISE EXCEPTION 'Chat message content, participants, session linkage, and cryptographic fingerprint are immutable.';
+         END IF;
+
+         -- Prevent extending message retention beyond its initial 30-day ceiling
+         IF NEW.expires_at > OLD.expires_at THEN
+             RAISE EXCEPTION 'Message retention expiration cannot be extended.';
+         END IF;
+
+         RETURN NEW;
+     END;
+     $$ LANGUAGE plpgsql;
+
+     CREATE TRIGGER trg_chat_messages_guard
+     BEFORE UPDATE ON chat_messages
+     FOR EACH ROW EXECUTE FUNCTION trg_chat_messages_immutability();
+     ```
 - **Constraints & Indexes**:
   - `PRIMARY KEY (id)`
   - `UNIQUE (id, chat_id)` *(Composite uniqueness linking message to its chat session)*
@@ -811,7 +844,7 @@ Normalized evidence-hold relationship supporting multiple concurrent reports and
                  RAISE EXCEPTION 'Referenced message % does not exist in chat_messages.', NEW.message_id;
              END IF;
 
-             IF v_msg_chat_id <> NEW.chat_session_id THEN
+             IF v_msg_chat_id IS DISTINCT FROM NEW.chat_session_id THEN
                  RAISE EXCEPTION 'Evidence hold session mismatch: message % belongs to chat session %, but hold specifies chat session %.',
                      NEW.message_id, v_msg_chat_id, NEW.chat_session_id;
              END IF;
@@ -819,24 +852,24 @@ Normalized evidence-hold relationship supporting multiple concurrent reports and
              -- Authoritatively latch or verify the cryptographic SHA-256 fingerprint
              IF NEW.message_content_hash IS NULL THEN
                  NEW.message_content_hash := v_msg_hash;
-             ELSIF NEW.message_content_hash <> v_msg_hash THEN
+             ELSIF NEW.message_content_hash IS DISTINCT FROM v_msg_hash THEN
                  RAISE EXCEPTION 'Evidence hold content hash mismatch for message %.', NEW.message_id;
              END IF;
          END IF;
 
          -- 2. On UPDATE: protect immutability of session reference, content hash, and message identity
          IF TG_OP = 'UPDATE' THEN
-             IF NEW.chat_session_id <> OLD.chat_session_id THEN
+             IF NEW.chat_session_id IS DISTINCT FROM OLD.chat_session_id THEN
                  RAISE EXCEPTION 'chat_session_id is permanent and immutable on evidence holds.';
              END IF;
 
-             IF NEW.message_content_hash <> OLD.message_content_hash THEN
+             IF NEW.message_content_hash IS DISTINCT FROM OLD.message_content_hash THEN
                  RAISE EXCEPTION 'message_content_hash is permanent and immutable on evidence holds.';
              END IF;
 
              -- Permit message_id to transition from non-null to NULL (routine scrubbing via ON DELETE SET NULL)
              -- Prohibit mutating message_id to a different message or reattaching to a scrubbed hold
-             IF OLD.message_id IS NOT NULL AND NEW.message_id IS NOT NULL AND NEW.message_id <> OLD.message_id THEN
+             IF OLD.message_id IS NOT NULL AND NEW.message_id IS NOT NULL AND NEW.message_id IS DISTINCT FROM OLD.message_id THEN
                  RAISE EXCEPTION 'Evidence hold message_id cannot be reassigned to a different message.';
              END IF;
 
@@ -853,18 +886,53 @@ Normalized evidence-hold relationship supporting multiple concurrent reports and
      BEFORE INSERT OR UPDATE ON message_evidence_holds
      FOR EACH ROW EXECUTE FUNCTION trg_evidence_holds_session_consistency();
      ```
-  6. **Scrubbing Sequence**:
-     - Routine scrubbing sweeps query messages where `expires_at < now()` and zero `ACTIVE` holds exist:
+  6. **Concurrency, Scrubbing Sequence & Transactional Safety**:
+     - **Hold Placement Row Locking**: When placing an evidence hold, the handler/service executes inside an atomic transaction and acquires a shared lock on the message:
        ```sql
+       BEGIN;
+       -- Acquire shared row-level lock on the message, preventing concurrent deletion
+       SELECT chat_id, content_hash 
+       FROM chat_messages 
+       WHERE id = :message_id 
+       FOR SHARE;
+
+       INSERT INTO message_evidence_holds (
+           message_id, chat_session_id, message_content_hash, report_id, legal_reference_id,
+           hold_type, status, reason, created_by_admin_id, created_by_system_actor
+       ) VALUES (
+           :message_id, :chat_id, :content_hash, :report_id, :legal_ref,
+           :hold_type, 'ACTIVE', :reason, :admin_id, :system_actor
+       );
+       COMMIT;
+       ```
+     - **Routine Retention Scrubbing Query**: Background scrubbing runs in controlled batches, locking candidate rows with `FOR UPDATE SKIP LOCKED`:
+       ```sql
+       WITH scrub_candidates AS (
+           SELECT id 
+           FROM chat_messages
+           WHERE expires_at < now()
+           FOR UPDATE SKIP LOCKED -- Concurrency-safe queue pattern avoiding lock contention
+           LIMIT 1000             -- Controlled batch processing
+       )
        DELETE FROM chat_messages m
-       WHERE m.expires_at < now()
+       USING scrub_candidates c
+       WHERE m.id = c.id
          AND NOT EXISTS (
-           SELECT 1 FROM message_evidence_holds h
-           WHERE h.message_id = m.id AND h.status = 'ACTIVE'
+           SELECT 1 
+           FROM message_evidence_holds h
+           WHERE h.message_id = m.id 
+             AND h.status = 'ACTIVE'
          );
        ```
-     - Deleting expired messages sets `message_evidence_holds.message_id = NULL` via PostgreSQL `ON DELETE SET NULL`.
-     - The `message_evidence_holds` row is **never deleted**. It permanently retains `chat_session_id`, `message_content_hash`, legal and report references, actor IDs, timestamps, reasons, and release notes.
+     - **Mathematical Concurrency Guarantee**:
+       1. The `FOR SHARE` lock acquired during hold creation blocks any concurrent `DELETE` from acquiring `FOR UPDATE` until the hold is committed.
+       2. The scrubber's `SKIP LOCKED` clause ensures ongoing hold placements are skipped without blocking or deadlocking.
+       3. Once the hold commits, the active hold row prevents the scrubber's `NOT EXISTS` condition from matching, permanently protecting the message from deletion until all holds are released.
+       4. If a message has no active holds and is locked `FOR UPDATE` by the scrubber, any subsequent attempt to place a hold will wait on `FOR SHARE` until the scrub transaction finishes, at which point the message is already deleted and the hold placement cleanly aborts.
+     - **Audit Survival Upon Scrubbing**:
+       - When all holds are released (`status = 'RELEASED'`), subsequent routine scrubbing sweeps delete the message row from `chat_messages`.
+       - PostgreSQL's `ON DELETE SET NULL` on `message_id` sets `message_evidence_holds.message_id = NULL`.
+       - The `message_evidence_holds` row is **never deleted**. It permanently retains `chat_session_id` (`ON DELETE RESTRICT`), `message_content_hash`, legal order reference, creation/release actors, and timestamps intact.
 - **Constraints & Indexes**:
   - `PRIMARY KEY (id)`
   - `FOREIGN KEY (message_id) REFERENCES chat_messages(id) ON DELETE SET NULL`
@@ -957,10 +1025,24 @@ Append-only, single-table transaction journal (not double-entry). Every balance 
 | `reason` | `TEXT` | **NO** | — | Human-readable transaction reason. |
 | `created_at` | `TIMESTAMPTZ` | **NO** | `now()` | Immutable creation timestamp. |
 
-- **Reconciliation, Composite Lineage & Priority Rules**:
+- **Reconciliation, Composite Lineage & Append-Only Rules**:
   1. **Strict Composite Lineage**: Any transaction with `credit_type = 'FREE'` must reference the exact allowance via composite foreign key `FOREIGN KEY (allowance_id, wallet_user_id, allowance_date) REFERENCES wallet_daily_allowances(id, user_id, allowance_date) ON DELETE RESTRICT`. This guarantees at the database engine level that allowance ownership and dates cannot desynchronize.
   2. **Free-First Priority**: When a fee is charged, active free credits are consumed before purchased coins.
   3. **Same Transaction Boundary**: Allowance updates and ledger entries execute within the **exact same database transaction**.
+  4. **Strict Append-Only Immutability Guard (`trg_wallet_ledgers_append_only`)**:
+     To guarantee that financial journal records cannot be forged, manipulated, or expunged, a database trigger prohibits `UPDATE` and `DELETE` operations:
+     ```sql
+     CREATE OR REPLACE FUNCTION trg_wallet_ledgers_immutability()
+     RETURNS TRIGGER AS $$
+     BEGIN
+         RAISE EXCEPTION 'wallet_ledgers is strictly append-only. UPDATE and DELETE operations are prohibited.';
+     END;
+     $$ LANGUAGE plpgsql;
+
+     CREATE TRIGGER trg_wallet_ledgers_append_only
+     BEFORE UPDATE OR DELETE ON wallet_ledgers
+     FOR EACH ROW EXECUTE FUNCTION trg_wallet_ledgers_immutability();
+     ```
 - **Constraints & Indexes**:
   - `PRIMARY KEY (id)`
   - `FOREIGN KEY (wallet_user_id) REFERENCES users(id) ON DELETE RESTRICT`
@@ -1115,6 +1197,20 @@ Tamper-resistant audit log capturing all sensitive administrative operations.
 | `reason` | `TEXT` | **NO** | — | Mandatory administrative justification. |
 | `created_at` | `TIMESTAMPTZ` | **NO** | `now()` | Execution timestamp. |
 
+- **Tamper-Resistance & Append-Only Architecture (`trg_admin_audit_logs_append_only`)**:
+  To guarantee that operational audit records and security traces cannot be altered or removed even by administrative database users, a database trigger prohibits `UPDATE` and `DELETE` operations:
+  ```sql
+  CREATE OR REPLACE FUNCTION trg_admin_audit_logs_immutability()
+  RETURNS TRIGGER AS $$
+  BEGIN
+      RAISE EXCEPTION 'admin_audit_logs is strictly append-only. UPDATE and DELETE operations are prohibited.';
+  END;
+  $$ LANGUAGE plpgsql;
+
+  CREATE TRIGGER trg_admin_audit_logs_append_only
+  BEFORE UPDATE OR DELETE ON admin_audit_logs
+  FOR EACH ROW EXECUTE FUNCTION trg_admin_audit_logs_immutability();
+  ```
 - **Constraints & Indexes**:
   - `PRIMARY KEY (id)`
   - `FOREIGN KEY (admin_user_id) REFERENCES users(id) ON DELETE RESTRICT`
@@ -1403,6 +1499,14 @@ The schema uses native PostgreSQL constraints to guarantee core domain invariant
 10. **Ledger Lineage and Composite Integrity Invariants**:
     - `wallet_ledgers`: `UNIQUE (idempotency_key)` guarantees duplicate transactions fail immediately.
     - `wallet_ledgers`: Composite foreign key `FOREIGN KEY (allowance_id, wallet_user_id, allowance_date) REFERENCES wallet_daily_allowances(id, user_id, allowance_date) ON DELETE RESTRICT` prevents ownership desynchronization.
+11. **Chat Message Immutability & Anti-Tamper Guard**:
+    - `chat_messages`: Database trigger `trg_chat_messages_guard` strictly prohibits updating `id`, `chat_id`, `sender_id`, `recipient_id`, `created_at`, `message_type`, `content_hash`, `telegram_file_id`, `file_size_bytes`, or `duration_seconds` using NULL-safe `IS DISTINCT FROM` comparisons, preventing moving messages between chat sessions or altering cryptographic fingerprints. Retention expiration cannot be extended beyond initial ceiling.
+12. **Strict Append-Only Financial Ledger & Tamper-Proof Audit Trail**:
+    - `wallet_ledgers`: Database trigger `trg_wallet_ledgers_append_only` strictly prohibits `UPDATE` and `DELETE` operations at the engine level.
+    - `admin_audit_logs`: Database trigger `trg_admin_audit_logs_append_only` strictly prohibits `UPDATE` and `DELETE` operations at the engine level.
+13. **Concurrency-Safe Evidence Preservation & Retention Scrubbing**:
+    - Evidence hold creation transactions acquire a shared row lock (`SELECT ... FOR SHARE`) on `chat_messages`, blocking concurrent deletion.
+    - Routine message scrubbing executes via batch queries with `FOR UPDATE SKIP LOCKED` and deletes messages only where `NOT EXISTS (SELECT 1 FROM message_evidence_holds WHERE status = 'ACTIVE')`, mathematically eliminating race conditions between hold placement and routine retention scrubbing.
 
 ---
 
