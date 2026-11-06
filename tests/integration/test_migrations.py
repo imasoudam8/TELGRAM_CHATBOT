@@ -10,6 +10,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import text
+from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from src.app.config.settings import Settings, get_settings
@@ -93,10 +94,17 @@ async def test_live_postgres_alembic_migration_lifecycle(
     db_suffix = uuid.uuid4().hex[:8]
     disposable_db_name = f"test_migration_{db_suffix}"
 
-    admin_url = (
-        f"postgresql+asyncpg://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}"
-        f"@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
-    )
+    raw_password = settings.POSTGRES_PASSWORD.get_secret_value()
+
+    admin_url = URL.create(
+        drivername="postgresql+asyncpg",
+        username=settings.POSTGRES_USER,
+        password=raw_password,
+        host=settings.POSTGRES_HOST,
+        port=settings.POSTGRES_PORT,
+        database=settings.POSTGRES_DB,
+    ).render_as_string(hide_password=False)
+
     admin_engine = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
 
     # 1. Create disposable PostgreSQL test database
@@ -105,13 +113,17 @@ async def test_live_postgres_alembic_migration_lifecycle(
             text(f'CREATE DATABASE "{disposable_db_name}" WITH OWNER "{settings.POSTGRES_USER}";')
         )
 
-    disposable_async_url = (
-        f"postgresql+asyncpg://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}"
-        f"@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{disposable_db_name}"
-    )
+    disposable_async_url = URL.create(
+        drivername="postgresql+asyncpg",
+        username=settings.POSTGRES_USER,
+        password=raw_password,
+        host=settings.POSTGRES_HOST,
+        port=settings.POSTGRES_PORT,
+        database=disposable_db_name,
+    ).render_as_string(hide_password=False)
 
     try:
-        # 2. Reconfigure settings and Alembic config to target disposable DB
+        # 2. Reconfigure settings & Alembic config to target disposable DB
         monkeypatch.setenv("POSTGRES_DB", disposable_db_name)
         get_settings.cache_clear()
 

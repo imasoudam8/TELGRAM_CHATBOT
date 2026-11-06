@@ -24,9 +24,13 @@ if config.config_file_name is not None:
 # Set target metadata for 'autogenerate' support
 target_metadata = Base.metadata
 
-# Inject database URL dynamically from Pydantic Settings
-settings = get_settings()
-config.set_main_option("sqlalchemy.url", settings.async_database_url_str)
+
+def get_db_url() -> str:
+    """Retrieve the database connection URL dynamically from Alembic config or Pydantic Settings."""
+    url = config.get_main_option("sqlalchemy.url")
+    if url:
+        return url
+    return get_settings().async_database_url_str
 
 
 def run_migrations_offline() -> None:
@@ -34,7 +38,7 @@ def run_migrations_offline() -> None:
 
     Configures the context with just a URL and not an Engine.
     """
-    url = config.get_main_option("sqlalchemy.url")
+    url = get_db_url()
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -61,7 +65,7 @@ def do_run_migrations(connection: Connection) -> None:
 async def run_async_migrations() -> None:
     """Run migrations in 'online' mode using an async engine."""
     configuration = config.get_section(config.config_ini_section) or {}
-    configuration["sqlalchemy.url"] = settings.async_database_url_str
+    configuration["sqlalchemy.url"] = get_db_url()
 
     connectable = async_engine_from_config(
         configuration,
