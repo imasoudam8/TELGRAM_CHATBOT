@@ -1,7 +1,7 @@
 # Database Architecture & Core Domain Data Model Specification
 
-**Document Version:** 1.4.0  
-**Phase:** Database Architecture Integrity Finalization (TASK 002.4)  
+**Document Version:** 1.5.0  
+**Phase:** Database Architecture Integrity & Final Sign-off (TASK 002.5)  
 **Target Engine:** PostgreSQL 16  
 **ORM / Data Layer:** SQLAlchemy 2.x (Async) & Alembic  
 **Caching & Ephemeral Layer:** Redis 7 (Async via `redis.asyncio`)  
@@ -19,7 +19,8 @@ The Anonymous Telegram Matching & Chat Bot is engineered as a **Modular Monolith
    - The private 64-bit Telegram User ID (`telegram_user_id`) is stored exclusively in the root `users` table. It is never exposed in profile lookups, matching queries, API responses, or bot messages.
    - Every user possesses an immutable, non-sequential alphanumeric `public_id` (e.g., `usr_7k9x2m4p8q1v`). Peer interactions, direct link requests, and profile exchanges reference `public_id` exclusively.
    - Phone numbers are never requested, ingested, or stored.
-   - User identity verification badges do not exist. Users explicitly self-declare adult eligibility ($\ge 18$) upon registration (`age_18_plus_declared`). Age is evaluated against the `Asia/Tehran` calendar date (`age_declared_date`) at declaration time. Profile creation is strictly guarded at the database level via a composite foreign key `(user_id, age_18_plus_declared)`.
+   - User identity verification badges do not exist. Users explicitly self-declare adult eligibility ($\ge 18$) upon registration (`age_18_plus_declared`).
+   - Authoritative declaration timestamp `users.age_declared_at` (UTC) derives `users.age_declared_date` in the `Asia/Tehran` calendar. A composite foreign key `(user_id, age_18_plus_declared, age_declared_date)` on `user_profiles` physically prevents profile creation for undeclared users and ensures zero contradiction between tables. Database triggers enforce permanent immutability of declaration events once recorded.
 2. **Clear Responsibility Boundary: PostgreSQL vs. Redis**:
    - **PostgreSQL 16**: Authoritative persistent system of record for user accounts, profiles, matching preferences, permanent connections, blocks, chat sessions, message metadata, normalized evidence holds, audit logs, reports, dynamic configuration, and the immutable financial ledger.
    - **Redis 7**: Ephemeral matchmaking queues, active waiting pools, live typing indicators, distributed concurrency locks, rate limits, and finite state machine (FSM) conversational wizard state.
@@ -30,21 +31,24 @@ The Anonymous Telegram Matching & Chat Bot is engineered as a **Modular Monolith
    - Daily free credits expire strictly at midnight in the `Asia/Tehran` timezone without carryover. Purchased credits never expire.
    - The daily free quota is dynamically configurable by Super Admins via `system_configurations` (no hardcoded fixed quota).
    - Financial operations are strictly encapsulated within the `Wallet Service`. No direct balance modifications from matchers or chat routers are permitted.
-4. **Conditional Deferred Chat Billing & Authoritative Direct Requester Resolution**:
+4. **Conditional Deferred Chat Billing & Relational Direct Request Enforcement**:
    - Connecting participants is always free. Charges occur **only after both participants have sent at least one message**.
    - Random chat costs 1 coin per participant.
-   - Direct chat sessions reference the originating accepted direct request via `chat_sessions.direct_request_id`. Direct chat settlement charges exactly 2 coins to `direct_requests.requester_id` (authoritatively resolved from the direct request record, independent of participant join ordering); the recipient pays 0 coins.
+   - Direct chat sessions require an originating request in `ACCEPTED` status, strictly guaranteed at the database engine level via a composite foreign key referencing `direct_requests(id, status, requester_id, target_id)`.
+   - Direct chat settlement charges exactly 2 coins to `direct_requests.requester_id` (authoritatively resolved from the direct request record, independent of participant join ordering); the recipient pays 0 coins.
    - If mutual participation never occurs before chat termination, neither participant is charged.
    - Direct request creation and acceptance are completely free.
    - All financial debits, ledger recordings, and chat session state updates occur within a **single atomic database transaction**.
 5. **Zero VPS Media Persistence & Strict Video Ceiling**:
    - The bot relays media using Telegram `file_id` references. No images, audio files, voice notes, or videos are downloaded or permanently stored on the host server disk.
    - Video payloads of 10 MB or larger ($10{,}485{,}760\text{ bytes}$) must always be rejected. Application validation and database schema constraints strictly enforce a less-than comparison (`file_size_bytes < 10485760`).
-6. **Bounded Message Retention & Audit-Preserving Multi-Evidence Holds**:
+6. **Bounded Message Retention & Audit-Verifiable Evidence Holds**:
    - Routine message text and media metadata have a maximum normal retention period of **30 days** (`expires_at = created_at + INTERVAL '30 days'`).
    - A message may be placed under hold by multiple independent reports or legal orders via a normalized `message_evidence_holds` junction entity.
    - Resolving one report releases only its own hold; message content is eligible for routine scrubbing only after all active holds are released.
-   - When an expired message is scrubbed, `message_evidence_holds.message_id` is set to `NULL` (`ON DELETE SET NULL`), scrubbing expired message content while permanently preserving hold creation and release audit metadata (`created_by`, `created_at`, `released_by`, `released_at`, `reason`, `release_notes`, `chat_session_id`, `report_id`).
+   - Every hold and hold release enforces verifiable actor attribution (human admin or explicit system actor identifier) and mandatory justification.
+   - Legal holds without user reports are fully supported and retain stable legal order references (`legal_reference_id`).
+   - When an expired message is scrubbed, `message_evidence_holds.message_id` is set to `NULL` (`ON DELETE SET NULL`), scrubbing message text and media IDs while permanently preserving hold creation and release audit metadata, durable session context (`chat_session_id NOT NULL REFERENCES chat_sessions(id) ON DELETE RESTRICT`), and cryptographic message fingerprint (`message_content_hash`).
    - Access to held evidence is restricted strictly to authorized moderators.
 7. **Complete Bidirectional Block Enforcement**:
    - A block between two users strictly prevents all communication, discovery, and requests in **both directions**.
@@ -106,14 +110,14 @@ erDiagram
     admin_users ||--o{ admin_audit_logs : "records action"
     admin_users ||--o{ system_configurations : "updates config"
 
-    direct_requests ||--o| chat_sessions : "originates direct chat"
+    direct_requests ||--o| chat_sessions : "accepted request originates"
 
     chat_sessions ||--o{ active_chat_participants : "active members"
     chat_sessions ||--o{ chat_messages : "contains messages"
     chat_sessions ||--o{ reports : "cited in"
 
     chat_messages ||--o{ message_evidence_holds : "preserved under"
-    chat_sessions ||--o{ message_evidence_holds : "audited under"
+    chat_sessions ||--o{ message_evidence_holds : "durable session context"
     reports ||--o{ message_evidence_holds : "establishes hold"
 
     wallet_daily_allowances ||--o{ wallet_ledgers : "reconciles free credit"
@@ -124,7 +128,8 @@ erDiagram
         varchar public_id UK "Public Identifier"
         varchar status
         boolean age_18_plus_declared
-        timestamptz age_declared_at
+        timestamptz age_declared_at "Authoritative UTC declaration timestamp"
+        date age_declared_date "Asia/Tehran calendar date of declaration"
         timestamptz created_at
         timestamptz last_activity_at
         timestamptz deleted_at
@@ -132,15 +137,15 @@ erDiagram
 
     user_profiles {
         bigint user_id PK "FK references users"
-        boolean age_18_plus_declared "FK references users"
-        birth_date date
-        age_declared_date date "Asia/Tehran calendar date of explicit declaration"
-        display_name varchar
-        gender varchar
-        city varchar
-        bio varchar
-        completion_status varchar
-        visibility varchar
+        boolean age_18_plus_declared "FK references users (Must be TRUE)"
+        date age_declared_date "FK references users (Asia/Tehran date)"
+        date birth_date
+        varchar display_name
+        varchar gender
+        varchar city
+        varchar bio
+        varchar completion_status
+        varchar visibility
         timestamptz updated_at
     }
 
@@ -159,7 +164,7 @@ erDiagram
         bigint id PK
         bigint requester_id FK
         bigint target_id FK
-        varchar status
+        varchar status "PENDING, ACCEPTED, REJECTED, EXPIRED, CANCELLED"
         timestamptz expires_at
         timestamptz created_at
         timestamptz responded_at
@@ -185,8 +190,9 @@ erDiagram
         uuid id PK
         varchar chat_type
         bigint direct_request_id FK "Nullable, required for DIRECT chats"
-        bigint participant_one_id FK
-        bigint participant_two_id FK
+        varchar direct_request_status "Always 'ACCEPTED' for DIRECT chats"
+        bigint participant_one_id FK "Matches direct_requests.requester_id for DIRECT"
+        bigint participant_two_id FK "Matches direct_requests.target_id for DIRECT"
         varchar status
         boolean participant_one_sent_msg
         boolean participant_two_sent_msg
@@ -221,16 +227,20 @@ erDiagram
     message_evidence_holds {
         bigint id PK
         bigint message_id FK "Nullable on message content deletion (ON DELETE SET NULL)"
-        uuid chat_session_id FK "Nullable (ON DELETE SET NULL), retains session audit context"
+        uuid chat_session_id FK "Durable session reference (ON DELETE RESTRICT)"
+        varchar message_content_hash "Cryptographic fingerprint of held message"
         bigint report_id FK "Nullable for legal holds"
-        varchar hold_type
-        varchar status
-        text reason
-        bigint created_by FK
+        varchar legal_reference_id "Required for legal holds"
+        varchar hold_type "USER_REPORT, LEGAL_HOLD, SAFETY_AUDIT"
+        varchar status "ACTIVE, RELEASED"
+        text reason "Mandatory hold justification"
+        bigint created_by_admin_id FK "Nullable if system actor"
+        varchar created_by_system_actor "Nullable if admin actor"
         timestamptz created_at
-        bigint released_by FK
-        timestamptz released_at
-        text release_notes
+        bigint released_by_admin_id FK "Nullable if active or system actor"
+        varchar released_by_system_actor "Nullable if active or admin actor"
+        timestamptz released_at "Required if status is RELEASED"
+        text release_notes "Required if status is RELEASED"
     }
 
     wallets {
@@ -336,7 +346,7 @@ erDiagram
 ### Domain Area A: User Accounts
 
 #### Table: `users`
-Represents the root identity record. Contains authentication routing metadata and account status.
+Represents the root identity record. Contains authentication routing metadata, account status, and authoritative adult self-declaration records.
 
 | Column Name | PostgreSQL Type | Nullable | Default | Description |
 | :--- | :--- | :--- | :--- | :--- |
@@ -345,20 +355,54 @@ Represents the root identity record. Contains authentication routing metadata an
 | `public_id` | `VARCHAR(32)` | **NO** | — | Non-sequential alphanumeric identifier (e.g. `usr_9k2m4x`). |
 | `status` | `VARCHAR(20)` | **NO** | `'ACTIVE'` | `'ACTIVE'`, `'SUSPENDED'`, `'BANNED'`, `'DELETED'`. |
 | `age_18_plus_declared` | `BOOLEAN` | **NO** | `FALSE` | Explicit declaration that user is $\ge 18$. Does not imply identity verification. |
-| `age_declared_at` | `TIMESTAMPTZ` | YES | `NULL` | UTC timestamp of explicit adult self-declaration. |
+| `age_declared_at` | `TIMESTAMPTZ` | YES | `NULL` | Authoritative UTC timestamp of explicit adult self-declaration. |
+| `age_declared_date` | `DATE` | YES | `NULL` | Derived calendar date in `Asia/Tehran` at declaration time. |
 | `created_at` | `TIMESTAMPTZ` | **NO** | `now()` | UTC account creation timestamp. |
 | `last_activity_at` | `TIMESTAMPTZ` | **NO** | `now()` | UTC timestamp of last Telegram interaction. |
 | `suspended_until` | `TIMESTAMPTZ` | YES | `NULL` | Timestamp until which the account is suspended. |
 | `suspension_reason` | `TEXT` | YES | `NULL` | Internal note explaining the suspension. |
 | `deleted_at` | `TIMESTAMPTZ` | YES | `NULL` | Soft-delete timestamp preserving ledger & audit integrity. |
 
+- **Authoritative Declaration Storage & Immutability Architecture**:
+  1. **Authoritative Timestamp**: `age_declared_at` is the authoritative UTC timestamp recorded when the user clicks the explicit 18+ declaration button in the Telegram wizard.
+  2. **Tehran Calendar Date Derivation**: A PostgreSQL `BEFORE INSERT OR UPDATE` trigger on `users` automatically derives `age_declared_date := (NEW.age_declared_at AT TIME ZONE 'Asia/Tehran')::date` whenever `age_18_plus_declared = TRUE`. This guarantees that `age_declared_date` can never deviate from `age_declared_at`.
+  3. **Immutability Enforcement Trigger**: Once `age_18_plus_declared = TRUE`, the trigger rejects any attempt to modify `age_18_plus_declared`, `age_declared_at`, or `age_declared_date`:
+     ```sql
+     CREATE OR REPLACE FUNCTION trg_users_age_declaration_immutability()
+     RETURNS TRIGGER AS $$
+     BEGIN
+         -- If declaration is being set for the first time
+         IF NEW.age_18_plus_declared = TRUE AND (OLD.age_18_plus_declared IS NULL OR OLD.age_18_plus_declared = FALSE) THEN
+             IF NEW.age_declared_at IS NULL THEN
+                 NEW.age_declared_at := now();
+             END IF;
+             NEW.age_declared_date := (NEW.age_declared_at AT TIME ZONE 'Asia/Tehran')::date;
+         END IF;
+
+         -- Prevent modification or revocation of established declaration
+         IF OLD.age_18_plus_declared = TRUE THEN
+             IF NEW.age_18_plus_declared <> TRUE OR 
+                NEW.age_declared_at <> OLD.age_declared_at OR 
+                NEW.age_declared_date <> OLD.age_declared_date THEN
+                 RAISE EXCEPTION 'Adult age declaration and declaration timestamps are permanent and immutable.';
+             END IF;
+         END IF;
+
+         RETURN NEW;
+     END;
+     $$ LANGUAGE plpgsql;
+
+     CREATE TRIGGER trg_users_declaration_guard
+     BEFORE INSERT OR UPDATE ON users
+     FOR EACH ROW EXECUTE FUNCTION trg_users_age_declaration_immutability();
+     ```
 - **Constraints & Indexes**:
   - `PRIMARY KEY (id)`
   - `UNIQUE (telegram_user_id)`
   - `UNIQUE (public_id)`
-  - `UNIQUE (id, age_18_plus_declared)` *(Required for profile composite relational integrity)*
+  - `UNIQUE (id, age_18_plus_declared, age_declared_date)` *(Target for profile composite relational integrity)*
   - `CHECK (status IN ('ACTIVE', 'SUSPENDED', 'BANNED', 'DELETED'))`
-  - `CHECK ((age_18_plus_declared = FALSE AND age_declared_at IS NULL) OR (age_18_plus_declared = TRUE AND age_declared_at IS NOT NULL))`
+  - `CHECK ((age_18_plus_declared = FALSE AND age_declared_at IS NULL AND age_declared_date IS NULL) OR (age_18_plus_declared = TRUE AND age_declared_at IS NOT NULL AND age_declared_date IS NOT NULL))`
   - `CHECK (age_declared_at IS NULL OR age_declared_at >= created_at)`
   - `INDEX idx_users_public_id (public_id)`
   - `INDEX idx_users_status (status) WHERE status = 'ACTIVE'`
@@ -368,14 +412,14 @@ Represents the root identity record. Contains authentication routing metadata an
 ### Domain Area B: User Profiles
 
 #### Table: `user_profiles`
-Public profile attributes presented during anonymous peer discovery.
+Public profile attributes presented during anonymous peer discovery. Profile creation is strictly guarded by composite foreign key against undeclared users.
 
 | Column Name | PostgreSQL Type | Nullable | Default | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | `user_id` | `BIGINT` | **NO** | — | Primary key & foreign key references `users(id)`. |
-| `age_18_plus_declared` | `BOOLEAN` | **NO** | `TRUE` | Foreign key component referencing `users(id, age_18_plus_declared)`. Must be `TRUE`. |
+| `age_18_plus_declared` | `BOOLEAN` | **NO** | `TRUE` | Component of foreign key referencing `users`. Must be `TRUE`. |
+| `age_declared_date` | `DATE` | **NO** | — | Component of foreign key referencing `users.age_declared_date`. |
 | `birth_date` | `DATE` | **NO** | — | User-declared birth date. |
-| `age_declared_date` | `DATE` | **NO** | — | Official `Asia/Tehran` calendar date at the exact moment of explicit adult self-declaration. |
 | `display_name` | `VARCHAR(50)` | **NO** | — | Chosen alias inside the bot (NOT Telegram username). |
 | `gender` | `VARCHAR(20)` | **NO** | — | `'MALE'`, `'FEMALE'`, `'NON_BINARY'`, `'OTHER'`. |
 | `city` | `VARCHAR(100)` | YES | `NULL` | Standardized metropolitan area (e.g., `'Tehran'`). |
@@ -385,40 +429,54 @@ Public profile attributes presented during anonymous peer discovery.
 | `created_at` | `TIMESTAMPTZ` | **NO** | `now()` | UTC creation timestamp. |
 | `updated_at` | `TIMESTAMPTZ` | **NO** | `now()` | UTC last modification timestamp. |
 
-- **Age Eligibility & Relational Invariant Architecture**:
-  1. **Strict Terminology & Anti-Verification Discipline**: No identity verification, KYC, or verified badges exist. The system strictly records self-declared adult eligibility.
-  2. **Tehran Calendar Evaluation**: When a user explicitly clicks the 18+ declaration button, the application computes the official `Asia/Tehran` calendar date (`age_declared_date`) and calculates age relative to `birth_date`:
-     ```python
-     tehran_now = datetime.now(ZoneInfo("Asia/Tehran"))
-     tehran_date = tehran_now.date()
-     declared_age = relativedelta(tehran_date, birth_date).years
-     if declared_age < 18:
-         raise AgeEligibilityViolation("User must be at least 18 years old in Asia/Tehran calendar.")
-     ```
-  3. **Relational Composite Foreign Key Guard**: A profile cannot be created or maintained for a user who has not declared adult eligibility. `FOREIGN KEY (user_id, age_18_plus_declared) REFERENCES users(id, age_18_plus_declared) ON DELETE RESTRICT` combined with `CHECK (age_18_plus_declared = TRUE)` physically prevents profile creation for undeclared users and blocks setting `users.age_18_plus_declared = FALSE` while a profile exists.
-  4. **Intra-Table Database Constraint**: `CHECK (birth_date <= (age_declared_date - INTERVAL '18 years'))` enforces age validity natively without cross-table triggers or non-immutable `CURRENT_DATE`.
-  5. **Immutability Trigger**: `age_declared_date` and `age_18_plus_declared` are protected by a database trigger preventing modification on `UPDATE`:
+- **Relational Consistency & Intra-Table Age Validation**:
+  1. **Anti-Contradiction Composite Key**: The composite foreign key `FOREIGN KEY (user_id, age_18_plus_declared, age_declared_date) REFERENCES users(id, age_18_plus_declared, age_declared_date) ON DELETE RESTRICT ON UPDATE RESTRICT` combined with `CHECK (age_18_plus_declared = TRUE)` guarantees that:
+     - A profile cannot be inserted unless the user row has `age_18_plus_declared = TRUE`.
+     - The profile's `age_declared_date` is guaranteed to match `users.age_declared_date` (which is derived from `users.age_declared_at` in `Asia/Tehran`).
+     - Neither representation can contradict the other.
+  2. **Intra-Table Age Check**: `CHECK (birth_date <= (age_declared_date - INTERVAL '18 years'))` enforces that the declared birth date satisfies the adult eligibility requirement relative to the exact declaration date. Non-immutable functions (`CURRENT_DATE`) are avoided completely.
+  3. **Profile Immutability Trigger**:
      ```sql
-     CREATE OR REPLACE FUNCTION trg_prevent_age_declaration_tampering()
+     CREATE OR REPLACE FUNCTION trg_user_profiles_age_immutability()
      RETURNS TRIGGER AS $$
      BEGIN
          IF NEW.age_declared_date <> OLD.age_declared_date THEN
-             RAISE EXCEPTION 'age_declared_date is immutable once set.';
+             RAISE EXCEPTION 'age_declared_date is immutable once established.';
          END IF;
          IF NEW.age_18_plus_declared <> OLD.age_18_plus_declared THEN
-             RAISE EXCEPTION 'age_18_plus_declared in user_profiles cannot be modified.';
+             RAISE EXCEPTION 'age_18_plus_declared cannot be modified.';
          END IF;
          RETURN NEW;
      END;
      $$ LANGUAGE plpgsql;
 
-     CREATE TRIGGER trg_user_profiles_age_immutability
+     CREATE TRIGGER trg_user_profiles_age_guard
      BEFORE UPDATE ON user_profiles
-     FOR EACH ROW EXECUTE FUNCTION trg_prevent_age_declaration_tampering();
+     FOR EACH ROW EXECUTE FUNCTION trg_user_profiles_age_immutability();
      ```
+  4. **Atomic Registration Transaction**:
+     ```sql
+     BEGIN;
+     -- Step 1: Explicit adult self-declaration
+     UPDATE users 
+     SET age_18_plus_declared = TRUE, age_declared_at = now() 
+     WHERE id = :user_id AND age_18_plus_declared = FALSE;
+
+     -- Step 2: Insert profile with matching declaration date
+     INSERT INTO user_profiles (
+         user_id, age_18_plus_declared, age_declared_date, birth_date,
+         display_name, gender, completion_status, visibility
+     ) VALUES (
+         :user_id, TRUE, 
+         (SELECT age_declared_date FROM users WHERE id = :user_id), 
+         :birth_date, :display_name, :gender, 'COMPLETED', 'PUBLIC'
+     );
+     COMMIT;
+     ```
+     If `birth_date` fails the 18+ interval check, the transaction aborts and rolls back completely.
 - **Constraints & Indexes**:
   - `PRIMARY KEY (user_id)`
-  - `FOREIGN KEY (user_id, age_18_plus_declared) REFERENCES users(id, age_18_plus_declared) ON DELETE RESTRICT`
+  - `FOREIGN KEY (user_id, age_18_plus_declared, age_declared_date) REFERENCES users(id, age_18_plus_declared, age_declared_date) ON DELETE RESTRICT ON UPDATE RESTRICT`
   - `CHECK (age_18_plus_declared = TRUE)`
   - `CHECK (birth_date <= (age_declared_date - INTERVAL '18 years'))`
   - `CHECK (gender IN ('MALE', 'FEMALE', 'NON_BINARY', 'OTHER'))`
@@ -461,7 +519,7 @@ Direct chat invitations initiated from user profile views or shared public links
 | :--- | :--- | :--- | :--- | :--- |
 | `id` | `BIGINT GENERATED ALWAYS AS IDENTITY` | **NO** | *Sequence* | Primary key. |
 | `requester_id` | `BIGINT` | **NO** | — | Foreign key references `users(id)` (Authoritative requester for direct chat billing). |
-| `target_id` | `BIGINT` | **NO** | — | Foreign key references `users(id)`. |
+| `target_id` | `BIGINT` | **NO** | — | Foreign key references `users(id)` (Recipient). |
 | `status` | `VARCHAR(20)` | **NO** | `'PENDING'` | `'PENDING'`, `'ACCEPTED'`, `'REJECTED'`, `'EXPIRED'`, `'CANCELLED'`. |
 | `expires_at` | `TIMESTAMPTZ` | **NO** | — | Fixed 24-hour expiration (`created_at + INTERVAL '24 hours'`). |
 | `created_at` | `TIMESTAMPTZ` | **NO** | `now()` | UTC submission timestamp. |
@@ -472,9 +530,10 @@ Direct chat invitations initiated from user profile views or shared public links
   - Direct request acceptance is **completely free** (0 coins).
   - When connection is accepted, chat is charged only after **mutual message exchange**, and costs 2 coins to `requester_id` **only** (the recipient pays 0 coins).
   - If a user blocks another while a request is pending, the request is immediately transitioned to `'CANCELLED'`.
+  - Once accepted, a direct request transitions to `status = 'ACCEPTED'`. While a `chat_sessions` row depends on it, foreign key constraint `ON UPDATE RESTRICT` prevents changing `status` to any other value.
 - **Constraints & Indexes**:
   - `PRIMARY KEY (id)`
-  - `UNIQUE (id, requester_id, target_id)` *(Required for composite chat_sessions foreign key integrity)*
+  - `UNIQUE (id, status, requester_id, target_id)` *(Required for chat_sessions accepted-status composite foreign key)*
   - `FOREIGN KEY (requester_id) REFERENCES users(id) ON DELETE RESTRICT`
   - `FOREIGN KEY (target_id) REFERENCES users(id) ON DELETE RESTRICT`
   - `CHECK (requester_id <> target_id)`
@@ -536,13 +595,14 @@ Bidirectional communication prohibition.
 ### Domain Area E: Chat Sessions
 
 #### Table: `chat_sessions`
-Captures session lifecycle, participation records, charging status, and termination reasons.
+Captures session lifecycle, participation records, charging status, and termination reasons. Enforces origin from an `ACCEPTED` direct request for direct chats.
 
 | Column Name | PostgreSQL Type | Nullable | Default | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | `id` | `UUID` | **NO** | `gen_random_uuid()` | Universally unique session ID. |
 | `chat_type` | `VARCHAR(20)` | **NO** | — | `'RANDOM'`, `'DIRECT'`. |
-| `direct_request_id` | `BIGINT` | YES | `NULL` | References `direct_requests(id)` ON DELETE RESTRICT. Required for `DIRECT` chats, NULL for `RANDOM`. |
+| `direct_request_id` | `BIGINT` | YES | `NULL` | References `direct_requests(id)`. Required for `DIRECT` chats, NULL for `RANDOM`. |
+| `direct_request_status` | `VARCHAR(20)` | YES | `NULL` | Must be `'ACCEPTED'` for `DIRECT` chats, NULL for `RANDOM`. |
 | `participant_one_id` | `BIGINT` | **NO** | — | Participant 1 (For DIRECT chats, strictly matches `requester_id`). |
 | `participant_two_id` | `BIGINT` | **NO** | — | Participant 2 (For DIRECT chats, strictly matches `target_id`). |
 | `status` | `VARCHAR(20)` | **NO** | `'INITIATED'` | `'INITIATED'`, `'ACTIVE'`, `'ENDED'`. |
@@ -555,19 +615,22 @@ Captures session lifecycle, participation records, charging status, and terminat
 | `started_at` | `TIMESTAMPTZ` | YES | `NULL` | Timestamp when both joined. |
 | `ended_at` | `TIMESTAMPTZ` | YES | `NULL` | Timestamp when session terminated. |
 
-- **Authoritative Direct Request Relational Guard**:
-  1. For `DIRECT` chats, `direct_request_id` is mandatory and references the exact accepted direct request.
-  2. The composite foreign key `FOREIGN KEY (direct_request_id, participant_one_id, participant_two_id) REFERENCES direct_requests(id, requester_id, target_id) ON DELETE RESTRICT` enforces at the database schema level that `participant_one_id` IS `direct_requests.requester_id` and `participant_two_id` IS `direct_requests.target_id`.
-  3. For `RANDOM` chats, `direct_request_id` must be `NULL`.
+- **Database-Level Enforcement of Accepted Direct Requests**:
+  1. For `DIRECT` chats, `direct_request_id` is mandatory and `direct_request_status` must equal `'ACCEPTED'`.
+  2. The composite foreign key `FOREIGN KEY (direct_request_id, direct_request_status, participant_one_id, participant_two_id) REFERENCES direct_requests(id, status, requester_id, target_id) ON DELETE RESTRICT ON UPDATE RESTRICT`:
+     - Guarantees at the database engine level that the direct chat references a request that is currently `ACCEPTED`.
+     - Prevents inserting a direct chat against a `PENDING`, `REJECTED`, `EXPIRED`, or `CANCELLED` request.
+     - Prevents updating `direct_requests.status` away from `ACCEPTED` while a chat session references it (`ON UPDATE RESTRICT`).
+     - Strictly enforces `participant_one_id = direct_requests.requester_id` and `participant_two_id = direct_requests.target_id`.
+  3. For `RANDOM` chats, both `direct_request_id` and `direct_request_status` must be `NULL`.
 - **Constraints & Indexes**:
   - `PRIMARY KEY (id)`
   - `FOREIGN KEY (participant_one_id) REFERENCES users(id) ON DELETE RESTRICT`
   - `FOREIGN KEY (participant_two_id) REFERENCES users(id) ON DELETE RESTRICT`
-  - `FOREIGN KEY (direct_request_id) REFERENCES direct_requests(id) ON DELETE RESTRICT`
-  - `FOREIGN KEY (direct_request_id, participant_one_id, participant_two_id) REFERENCES direct_requests(id, requester_id, target_id) ON DELETE RESTRICT`
+  - `FOREIGN KEY (direct_request_id, direct_request_status, participant_one_id, participant_two_id) REFERENCES direct_requests(id, status, requester_id, target_id) ON DELETE RESTRICT ON UPDATE RESTRICT`
   - `CHECK (participant_one_id <> participant_two_id)`
   - `CHECK (chat_type IN ('RANDOM', 'DIRECT'))`
-  - `CHECK ((chat_type = 'RANDOM' AND direct_request_id IS NULL) OR (chat_type = 'DIRECT' AND direct_request_id IS NOT NULL))`
+  - `CHECK ((chat_type = 'RANDOM' AND direct_request_id IS NULL AND direct_request_status IS NULL) OR (chat_type = 'DIRECT' AND direct_request_id IS NOT NULL AND direct_request_status = 'ACCEPTED'))`
   - `CHECK (status IN ('INITIATED', 'ACTIVE', 'ENDED'))`
   - `INDEX idx_chat_sessions_history (participant_one_id, participant_two_id, status)`
   - `INDEX idx_chat_sessions_direct_request (direct_request_id) WHERE direct_request_id IS NOT NULL`
@@ -589,7 +652,7 @@ Junction table enforcing the **"One active chat per user"** invariant at the sch
 
 ---
 
-### Domain Area F: Messages, Retention, and Audit-Preserving Evidence Holds
+### Domain Area F: Messages, Retention, and Audit-Verifiable Evidence Holds
 
 #### Table: `chat_messages`
 Stores message metadata, retention deadlines, and Telegram media identifiers without local file storage.
@@ -626,30 +689,33 @@ Stores message metadata, retention deadlines, and Telegram media identifiers wit
   - `INDEX idx_chat_messages_cleanup (expires_at)`
 
 #### Table: `message_evidence_holds`
-Normalized evidence-hold relationship supporting multiple concurrent reports and legal holds while preserving complete moderation audit history.
+Normalized evidence-hold relationship supporting multiple concurrent reports and legal holds. Preserves durable moderation and legal audit history without retaining expired message content.
 
 | Column Name | PostgreSQL Type | Nullable | Default | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | `id` | `BIGINT GENERATED ALWAYS AS IDENTITY` | **NO** | *Sequence* | Primary key. |
-| `message_id` | `BIGINT` | YES | `NULL` | Foreign key references `chat_messages(id)` ON DELETE SET NULL. Set to NULL when message content is scrubbed. |
-| `chat_session_id` | `UUID` | YES | `NULL` | Foreign key references `chat_sessions(id)` ON DELETE SET NULL. Retains session context after message deletion. |
-| `report_id` | `BIGINT` | YES | `NULL` | Foreign key references `reports(id)` ON DELETE RESTRICT (NULL for legal holds). |
+| `message_id` | `BIGINT` | YES | `NULL` | References `chat_messages(id)` ON DELETE SET NULL. Nulled out when message content is scrubbed. |
+| `chat_session_id` | `UUID` | **NO** | — | References `chat_sessions(id)` ON DELETE RESTRICT. Permanently retains session context. |
+| `message_content_hash` | `VARCHAR(64)` | **NO** | — | SHA-256 fingerprint of the held message, preserved permanently even after content scrubbing. |
+| `report_id` | `BIGINT` | YES | `NULL` | References `reports(id)` ON DELETE RESTRICT (Required for user reports, NULL for legal holds). |
+| `legal_reference_id` | `VARCHAR(100)` | YES | `NULL` | Court order number, warrant ID, or regulatory reference (Required for legal holds). |
 | `hold_type` | `VARCHAR(30)` | **NO** | — | `'USER_REPORT'`, `'LEGAL_HOLD'`, `'SAFETY_AUDIT'`. |
 | `status` | `VARCHAR(20)` | **NO** | `'ACTIVE'` | `'ACTIVE'`, `'RELEASED'`. |
-| `reason` | `TEXT` | **NO** | — | Justification for hold placement. |
-| `created_by` | `BIGINT` | YES | `NULL` | References `users(id)` (Admin or system). |
-| `created_at` | `TIMESTAMPTZ` | **NO** | `now()` | Hold creation timestamp. |
-| `released_by` | `BIGINT` | YES | `NULL` | References `users(id)` (Moderator releasing hold). |
+| `reason` | `TEXT` | **NO** | — | Mandatory administrative or legal justification. |
+| `created_by_admin_id` | `BIGINT` | YES | `NULL` | Admin/moderator actor ID (References `admin_users(user_id)`). |
+| `created_by_system_actor`| `VARCHAR(50)` | YES | `NULL` | Explicit automated service identifier (e.g. `'SYSTEM_REPORT_TRIGGER'`). |
+| `created_at` | `TIMESTAMPTZ` | **NO** | `now()` | Hold placement timestamp. |
+| `released_by_admin_id` | `BIGINT` | YES | `NULL` | Admin/moderator who released the hold. |
+| `released_by_system_actor`| `VARCHAR(50)` | YES | `NULL` | Explicit automated service identifier (e.g. `'REPORT_DISMISSAL_WORKER'`). |
 | `released_at` | `TIMESTAMPTZ` | YES | `NULL` | Timestamp when hold was released. |
-| `release_notes` | `TEXT` | YES | `NULL` | Commentary on hold release rationale. |
+| `release_notes` | `TEXT` | YES | `NULL` | Mandatory commentary explaining release rationale. |
 
 - **Audit Preservation & Ephemeral Content Scrubbing Architecture**:
-  1. **Multiple Independent Holds**: A message may be cited by multiple distinct reports or legal holds. Each creates an independent row in `message_evidence_holds`.
-  2. **Legal Holds Without User Reports**: Legal holds (`hold_type = 'LEGAL_HOLD'`) set `report_id = NULL` while retaining administrative justification.
-  3. **Release & Scrubbing Lifecycle**:
-     - As long as `status = 'ACTIVE'`, scrubbing queries bypass the message:
-       `WHERE m.expires_at < now() AND NOT EXISTS (SELECT 1 FROM message_evidence_holds h WHERE h.message_id = m.id AND h.status = 'ACTIVE')`.
-     - When all holds on an expired message transition to `status = 'RELEASED'`, routine scrubbing deletes the row from `chat_messages`:
+  1. **Enforced Verifiable Actors**: Every hold row must have an explicit creator (`created_by_admin_id` OR `created_by_system_actor`), and every released hold must have `released_at`, `release_notes`, and an explicit releaser (`released_by_admin_id` OR `released_by_system_actor`). Anonymous null actor states are prohibited by schema check constraints.
+  2. **Legal Holds Without User Reports**: Supported natively via `hold_type = 'LEGAL_HOLD'`, `report_id IS NULL`, and `legal_reference_id NOT NULL`.
+  3. **Permanent Session Audit Survival**: `chat_session_id UUID NOT NULL REFERENCES chat_sessions(id) ON DELETE RESTRICT` permanently binds the hold to the chat session metadata (participants, timestamps, chat type, end reason). Chat sessions cited in evidence holds cannot be purged while hold records exist.
+  4. **Scrubbing Sequence**:
+     - Routine scrubbing sweeps query messages where `expires_at < now()` and zero `ACTIVE` holds exist:
        ```sql
        DELETE FROM chat_messages m
        WHERE m.expires_at < now()
@@ -658,22 +724,25 @@ Normalized evidence-hold relationship supporting multiple concurrent reports and
            WHERE h.message_id = m.id AND h.status = 'ACTIVE'
          );
        ```
-     - Upon message deletion, PostgreSQL's `ON DELETE SET NULL` automatically updates `message_evidence_holds.message_id = NULL`.
-     - The `message_evidence_holds` audit record is **never deleted**. It permanently retains `created_by`, `created_at`, `released_by`, `released_at`, `reason`, `release_notes`, `chat_session_id`, and `report_id`.
-     - This completely scrubs expired message content and media references while preserving 100% of moderation audit history.
+     - Deleting expired messages sets `message_evidence_holds.message_id = NULL` via PostgreSQL `ON DELETE SET NULL`.
+     - The `message_evidence_holds` row is **never deleted**. It permanently retains `chat_session_id`, `message_content_hash`, legal and report references, actor IDs, timestamps, reasons, and release notes.
 - **Constraints & Indexes**:
   - `PRIMARY KEY (id)`
   - `FOREIGN KEY (message_id) REFERENCES chat_messages(id) ON DELETE SET NULL`
-  - `FOREIGN KEY (chat_session_id) REFERENCES chat_sessions(id) ON DELETE SET NULL`
+  - `FOREIGN KEY (chat_session_id) REFERENCES chat_sessions(id) ON DELETE RESTRICT`
   - `FOREIGN KEY (report_id) REFERENCES reports(id) ON DELETE RESTRICT`
-  - `FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT`
-  - `FOREIGN KEY (released_by) REFERENCES users(id) ON DELETE RESTRICT`
+  - `FOREIGN KEY (created_by_admin_id) REFERENCES admin_users(user_id) ON DELETE RESTRICT`
+  - `FOREIGN KEY (released_by_admin_id) REFERENCES admin_users(user_id) ON DELETE RESTRICT`
   - `CHECK (hold_type IN ('USER_REPORT', 'LEGAL_HOLD', 'SAFETY_AUDIT'))`
   - `CHECK (status IN ('ACTIVE', 'RELEASED'))`
-  - `CHECK ((status = 'ACTIVE' AND released_at IS NULL AND released_by IS NULL) OR (status = 'RELEASED' AND released_at IS NOT NULL))`
-  - `UNIQUE (message_id, report_id)` where `report_id IS NOT NULL`
+  - `CHECK ((created_by_admin_id IS NOT NULL AND created_by_system_actor IS NULL) OR (created_by_admin_id IS NULL AND created_by_system_actor IS NOT NULL))`
+  - `CHECK ((status = 'ACTIVE' AND released_at IS NULL AND released_by_admin_id IS NULL AND released_by_system_actor IS NULL AND release_notes IS NULL) OR (status = 'RELEASED' AND released_at IS NOT NULL AND release_notes IS NOT NULL AND ((released_by_admin_id IS NOT NULL AND released_by_system_actor IS NULL) OR (released_by_admin_id IS NULL AND released_by_system_actor IS NOT NULL))))`
+  - `CHECK ((hold_type = 'LEGAL_HOLD' AND legal_reference_id IS NOT NULL AND report_id IS NULL) OR (hold_type = 'USER_REPORT' AND report_id IS NOT NULL AND legal_reference_id IS NULL) OR (hold_type = 'SAFETY_AUDIT'))`
+  - `UNIQUE (message_id, report_id)` where `message_id IS NOT NULL AND report_id IS NOT NULL`
+  - `UNIQUE (message_id, legal_reference_id)` where `message_id IS NOT NULL AND legal_reference_id IS NOT NULL`
   - `INDEX idx_evidence_holds_active (message_id) WHERE status = 'ACTIVE'`
   - `INDEX idx_evidence_holds_report (report_id) WHERE report_id IS NOT NULL`
+  - `INDEX idx_evidence_holds_legal (legal_reference_id) WHERE legal_reference_id IS NOT NULL`
 
 ---
 
@@ -1133,7 +1202,8 @@ chat.charged_at = datetime.now(timezone.utc)
    - `chat_messages` records feature an `expires_at` column set to `created_at + INTERVAL '30 days'`.
    - Normal retention is capped at 30 days.
    - User reports and legal holds place independent rows in `message_evidence_holds`.
-   - Releasing holds and cleaning expired messages purges `chat_messages` rows while setting `message_evidence_holds.message_id = NULL` via `ON DELETE SET NULL`, preserving 100% of hold creation and release audit metadata (`created_by`, `created_at`, `released_by`, `released_at`, `reason`, `release_notes`, `chat_session_id`, `report_id`).
+   - When all holds on an expired message transition to `status = 'RELEASED'`, routine scrubbing deletes the message content from `chat_messages`, which sets `message_evidence_holds.message_id = NULL` via `ON DELETE SET NULL`.
+   - The hold audit record in `message_evidence_holds` permanently survives with `chat_session_id` (`ON DELETE RESTRICT`), message content hash, legal order reference, creation/release actors, and timestamps intact.
 4. **Cryptographically Secure Negative Account Deletion Pseudonymization**:
    - Hard deletion (`DELETE FROM users`) is prevented by `ON DELETE RESTRICT` foreign keys on `wallets`, `wallet_ledgers`, `wallet_daily_allowances`, and `admin_audit_logs`.
    - When a user deletes their account:
@@ -1164,8 +1234,8 @@ The schema uses native PostgreSQL constraints to guarantee core domain invariant
    - `user_blocks`: `CHECK (blocker_id <> blocked_id)`
    - `reports`: `CHECK (reporter_id <> reported_user_id)`
    - `user_connections`: `CHECK (user_id <> connected_user_id)`
-3. **Authoritative Direct Request Relational Guard**:
-   `chat_sessions`: Composite foreign key `FOREIGN KEY (direct_request_id, participant_one_id, participant_two_id) REFERENCES direct_requests(id, requester_id, target_id) ON DELETE RESTRICT` enforces at the database schema level that `participant_one_id` IS `direct_requests.requester_id` and `participant_two_id` IS `direct_requests.target_id` for direct chats.
+3. **Accepted Direct Request & Participant Identity Enforcement**:
+   `chat_sessions`: Composite foreign key `FOREIGN KEY (direct_request_id, direct_request_status, participant_one_id, participant_two_id) REFERENCES direct_requests(id, status, requester_id, target_id) ON DELETE RESTRICT ON UPDATE RESTRICT` combined with `CHECK (direct_request_status = 'ACCEPTED')` guarantees that direct chats can only be created against an accepted direct request, and that `participant_one_id` IS `requester_id` and `participant_two_id` IS `target_id`.
 4. **Strict Video Size Ceiling**:
    `chat_messages`: `CHECK (message_type <> 'VIDEO' OR file_size_bytes < 10485760)` strictly enforces rejection of video payloads at or above 10 MB.
 5. **Hard Upper Bound on Configuration Parameters**:
@@ -1174,12 +1244,15 @@ The schema uses native PostgreSQL constraints to guarantee core domain invariant
 6. **Strict Message Retention Ceiling**:
    `chat_messages`: `CHECK (expires_at <= created_at + INTERVAL '30 days')` guarantees that routine message records cannot be scheduled for retention beyond 30 days.
 7. **Age Eligibility Intra-Table & Relational Foreign Key Guard**:
-   - `user_profiles`: Composite foreign key `FOREIGN KEY (user_id, age_18_plus_declared) REFERENCES users(id, age_18_plus_declared) ON DELETE RESTRICT` combined with `CHECK (age_18_plus_declared = TRUE)` physically prevents profile creation for undeclared users.
+   - `user_profiles`: Composite foreign key `FOREIGN KEY (user_id, age_18_plus_declared, age_declared_date) REFERENCES users(id, age_18_plus_declared, age_declared_date) ON DELETE RESTRICT ON UPDATE RESTRICT` combined with `CHECK (age_18_plus_declared = TRUE)` physically prevents profile creation for undeclared users and ensures zero contradiction.
    - `user_profiles`: `CHECK (birth_date <= (age_declared_date - INTERVAL '18 years'))` guarantees that declared birth dates cannot violate the 18+ threshold relative to the explicit declaration date in the Tehran calendar.
+   - Triggers on `users` and `user_profiles` enforce permanent immutability of adult declaration events.
 8. **Cascade Protection & Audit Preservation on Evidence Holds**:
    - `chat_messages`: `FOREIGN KEY (chat_id) REFERENCES chat_sessions(id) ON DELETE RESTRICT`
    - `message_evidence_holds`: `FOREIGN KEY (message_id) REFERENCES chat_messages(id) ON DELETE SET NULL`
+   - `message_evidence_holds`: `FOREIGN KEY (chat_session_id) REFERENCES chat_sessions(id) ON DELETE RESTRICT`
    - `message_evidence_holds`: `FOREIGN KEY (report_id) REFERENCES reports(id) ON DELETE RESTRICT`
+   - Explicit check constraints enforce verifiable creator and releaser actors and legal reference stability.
 9. **Non-Negative Balances & Strict Allowance Bounds**:
    - `wallets`: `CHECK (purchased_coins >= 0)`
    - `wallet_daily_allowances`: `CHECK (allocated_credits >= 0)`
