@@ -1,6 +1,16 @@
 """Centralized application configuration using Pydantic Settings."""
 
-from enum import StrEnum
+try:
+    from enum import StrEnum
+except ImportError:
+    from enum import Enum
+
+    class StrEnum(str, Enum):  # noqa: UP042
+        """Fallback StrEnum for Python < 3.11."""
+
+        pass
+
+
 from functools import lru_cache
 from typing import Annotated
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError

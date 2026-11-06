@@ -4,7 +4,12 @@ import json
 import logging
 import re
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+
+try:
+    from datetime import UTC
+except ImportError:
+    UTC = timezone.utc  # noqa: UP017
 from typing import Any
 
 from src.app.config.settings import Settings

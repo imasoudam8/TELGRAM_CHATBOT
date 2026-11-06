@@ -1,1 +1,5 @@
-"""Admin module - Administrative metrics, backoffice commands, and management."""
+"""SQLAlchemy models export for admin module."""
+
+from src.app.modules.admin.models import AdminAuditLog, AdminUser, SystemConfiguration
+
+__all__ = ["AdminAuditLog", "AdminUser", "SystemConfiguration"]

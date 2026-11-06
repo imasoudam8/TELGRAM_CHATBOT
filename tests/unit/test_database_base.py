@@ -1,6 +1,11 @@
 """Unit tests for SQLAlchemy base, mixins, and timezone conversions."""
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+
+try:
+    from datetime import UTC
+except ImportError:
+    UTC = timezone.utc  # noqa: UP017
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import Integer, String
