@@ -173,19 +173,20 @@ async def test_live_postgres_alembic_migration_lifecycle(
             # Verify PostgreSQL catalog functions
             proc_res = await conn.execute(
                 text(
-                    "SELECT proname FROM pg_proc JOIN pg_namespace n ON "
-                    "n.oid=pg_proc.pronamespace WHERE n.nspname='public';"
+                    "SELECT p.proname FROM pg_proc p "
+                    "JOIN pg_namespace n ON n.oid = p.pronamespace "
+                    "WHERE n.nspname = 'public';"
                 )
             )
             functions = {row[0] for row in proc_res.fetchall()}
             expected_functions = {
-                "trg_users_declaration_guard",
-                "trg_user_profiles_age_guard",
-                "trg_chat_sessions_lifecycle_guard",
-                "trg_chat_messages_guard",
-                "trg_message_evidence_holds_guard",
-                "trg_wallet_ledgers_append_only",
-                "trg_admin_audit_logs_append_only",
+                "trg_users_age_declaration_immutability",
+                "trg_user_profiles_age_immutability",
+                "trg_chat_sessions_immutability",
+                "trg_chat_messages_immutability",
+                "trg_evidence_holds_session_consistency",
+                "trg_wallet_ledgers_immutability",
+                "trg_admin_audit_logs_immutability",
             }
             assert expected_functions.issubset(functions), (
                 f"Missing catalog functions: {expected_functions - functions}"
@@ -194,13 +195,24 @@ async def test_live_postgres_alembic_migration_lifecycle(
             # Verify PostgreSQL catalog triggers
             trig_res = await conn.execute(
                 text(
-                    "SELECT tgname FROM pg_trigger "
-                    "WHERE tgname LIKE 'trg_%' AND tgisinternal = false;"
+                    "SELECT t.tgname FROM pg_trigger t "
+                    "JOIN pg_class c ON c.oid = t.tgrelid "
+                    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    "WHERE n.nspname = 'public' AND t.tgisinternal = false;"
                 )
             )
             triggers = {row[0] for row in trig_res.fetchall()}
-            assert expected_functions.issubset(triggers), (
-                f"Missing catalog triggers: {expected_functions - triggers}"
+            expected_triggers = {
+                "trg_users_declaration_guard",
+                "trg_user_profiles_age_guard",
+                "trg_chat_sessions_lifecycle_guard",
+                "trg_chat_messages_guard",
+                "trg_message_evidence_holds_guard",
+                "trg_wallet_ledgers_append_only",
+                "trg_admin_audit_logs_append_only",
+            }
+            assert expected_triggers.issubset(triggers), (
+                f"Missing catalog triggers: {expected_triggers - triggers}"
             )
 
             # Exercise user age declaration trigger
