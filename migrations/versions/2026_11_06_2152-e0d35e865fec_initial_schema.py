@@ -1049,7 +1049,9 @@ def upgrade() -> None:
         RETURN NEW;
     END;
     $$ LANGUAGE plpgsql;
+    """)
 
+    op.execute("""
     CREATE TRIGGER trg_users_declaration_guard
     BEFORE INSERT OR UPDATE ON users
     FOR EACH ROW EXECUTE FUNCTION trg_users_age_declaration_immutability();
@@ -1069,7 +1071,9 @@ def upgrade() -> None:
         RETURN NEW;
     END;
     $$ LANGUAGE plpgsql;
+    """)
 
+    op.execute("""
     CREATE TRIGGER trg_user_profiles_age_guard
     BEFORE UPDATE ON user_profiles
     FOR EACH ROW EXECUTE FUNCTION trg_user_profiles_age_immutability();
@@ -1104,7 +1108,9 @@ def upgrade() -> None:
         RETURN NEW;
     END;
     $$ LANGUAGE plpgsql;
+    """)
 
+    op.execute("""
     CREATE TRIGGER trg_chat_sessions_lifecycle_guard
     BEFORE UPDATE ON chat_sessions
     FOR EACH ROW EXECUTE FUNCTION trg_chat_sessions_immutability();
@@ -1135,7 +1141,9 @@ def upgrade() -> None:
         RETURN NEW;
     END;
     $$ LANGUAGE plpgsql;
+    """)
 
+    op.execute("""
     CREATE TRIGGER trg_chat_messages_guard
     BEFORE UPDATE ON chat_messages
     FOR EACH ROW EXECUTE FUNCTION trg_chat_messages_immutability();
@@ -1192,7 +1200,9 @@ def upgrade() -> None:
         RETURN NEW;
     END;
     $$ LANGUAGE plpgsql;
+    """)
 
+    op.execute("""
     CREATE TRIGGER trg_message_evidence_holds_guard
     BEFORE INSERT OR UPDATE ON message_evidence_holds
     FOR EACH ROW EXECUTE FUNCTION trg_evidence_holds_session_consistency();
@@ -1206,7 +1216,9 @@ def upgrade() -> None:
         RAISE EXCEPTION 'wallet_ledgers is strictly append-only. UPDATE and DELETE operations are prohibited.';
     END;
     $$ LANGUAGE plpgsql;
+    """)
 
+    op.execute("""
     CREATE TRIGGER trg_wallet_ledgers_append_only
     BEFORE UPDATE OR DELETE ON wallet_ledgers
     FOR EACH ROW EXECUTE FUNCTION trg_wallet_ledgers_immutability();
@@ -1220,7 +1232,9 @@ def upgrade() -> None:
         RAISE EXCEPTION 'admin_audit_logs is strictly append-only. UPDATE and DELETE operations are prohibited.';
     END;
     $$ LANGUAGE plpgsql;
+    """)
 
+    op.execute("""
     CREATE TRIGGER trg_admin_audit_logs_append_only
     BEFORE UPDATE OR DELETE ON admin_audit_logs
     FOR EACH ROW EXECUTE FUNCTION trg_admin_audit_logs_immutability();
