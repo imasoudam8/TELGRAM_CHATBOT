@@ -237,15 +237,16 @@ async def test_live_postgres_alembic_migration_lifecycle(
 
             # Exercise invalid profile INSERT (age < 18 -> trigger failure)
             with pytest.raises(Exception) as exc_info:
-                await conn.execute(
-                    text(
-                        "INSERT INTO user_profiles (user_id, age_18_plus_declared, "
-                        "age_declared_date, birth_date, display_name, gender, city, "
-                        f"completion_status, visibility) VALUES ({user_id}, TRUE, "
-                        f"'{age_declared_date}', CURRENT_DATE - INTERVAL '10 years', "
-                        "'Minor User', 'MALE', 'Tehran', 'COMPLETED', 'PUBLIC');"
+                async with conn.begin_nested():
+                    await conn.execute(
+                        text(
+                            "INSERT INTO user_profiles (user_id, age_18_plus_declared, "
+                            "age_declared_date, birth_date, display_name, gender, city, "
+                            f"completion_status, visibility) VALUES ({user_id}, TRUE, "
+                            f"'{age_declared_date}', CURRENT_DATE - INTERVAL '10 years', "
+                            "'Minor User', 'MALE', 'Tehran', 'COMPLETED', 'PUBLIC');"
+                        )
                     )
-                )
             err_msg = str(exc_info.value).lower()
             assert "18 years" in err_msg or "age" in err_msg
 
