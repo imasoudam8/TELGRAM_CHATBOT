@@ -204,6 +204,11 @@ class Settings(BaseSettings):
         return ZoneInfo(self.TIMEZONE)
 
     @property
+    def business_timezone(self) -> ZoneInfo:
+        """Alias property returning the parsed business timezone ZoneInfo instance."""
+        return self.business_zoneinfo
+
+    @property
     def async_database_url(self) -> URL:
         """Construct the asyncpg connection URL for SQLAlchemy."""
         return URL.create(

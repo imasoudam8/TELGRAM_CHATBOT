@@ -193,3 +193,78 @@ async def test_live_redis_operations(live_service_settings: Settings) -> None:
     # Step 6: Verify Redis manager closed cleanly
     assert manager._client is None
     assert manager._pool is None
+
+
+@pytest.mark.asyncio
+async def test_live_postgres_user_registration(live_service_settings: Settings) -> None:
+    """Verify live PostgreSQL 16 user registration, age declaration, and uniqueness."""
+    if not is_ci_environment() and not is_service_reachable(
+        live_service_settings.POSTGRES_HOST, live_service_settings.POSTGRES_PORT
+    ):
+        pytest.skip(
+            f"PostgreSQL service not reachable on {live_service_settings.POSTGRES_HOST}:"
+            f"{live_service_settings.POSTGRES_PORT} (local test environment)"
+        )
+
+    import random
+    from zoneinfo import ZoneInfo
+
+    from sqlalchemy import select, text
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from src.app.modules.users.models import User
+    from src.app.modules.users.service import UserService
+
+    manager = DatabaseManager(live_service_settings)
+    await manager.initialize()
+
+    user_service = UserService(manager)
+    test_telegram_id = random.randint(1_000_000, 9_999_999_999)
+    tehran_tz = ZoneInfo("Asia/Tehran")
+
+    try:
+        # Step 1: Register adult user
+        user, is_new = await user_service.register_adult_user(test_telegram_id, tehran_tz)
+        assert is_new is True
+        assert user.telegram_user_id == test_telegram_id
+        assert user.age_18_plus_declared is True
+        assert user.age_declared_at is not None
+        assert user.age_declared_at.tzinfo is not None
+        assert user.age_declared_date is not None
+        assert user.public_id.startswith("usr_")
+
+        # Step 2: Idempotent repeated registration returns the same user without duplicate row
+        user_dup, is_new_dup = await user_service.register_adult_user(test_telegram_id, tehran_tz)
+        assert is_new_dup is False
+        assert user_dup.id == user.id
+        assert user_dup.public_id == user.public_id
+
+        # Step 3: Verify exactly 1 user row exists in PostgreSQL for this telegram_user_id
+        async with manager.session() as session:
+            stmt = select(User).where(User.telegram_user_id == test_telegram_id)
+            res = await session.execute(stmt)
+            rows = res.scalars().all()
+            assert len(rows) == 1
+
+        # Step 4: Verify Telegram ID uniqueness constraint in PostgreSQL catalog
+        with pytest.raises(SQLAlchemyError):
+            async with manager.session() as session:
+                async with session.begin_nested():
+                    await session.execute(
+                        text(
+                            "INSERT INTO users (telegram_user_id, public_id, status, "
+                            "age_18_plus_declared) "
+                            f"VALUES ({test_telegram_id}, 'usr_dummy_collision', 'ACTIVE', TRUE)"
+                        )
+                    )
+
+    finally:
+        # Step 5: Clean up test user
+        try:
+            async with manager.session() as session:
+                await session.execute(
+                    text(f"DELETE FROM users WHERE telegram_user_id = {test_telegram_id}")
+                )
+        except Exception:
+            pass
+        await manager.close()

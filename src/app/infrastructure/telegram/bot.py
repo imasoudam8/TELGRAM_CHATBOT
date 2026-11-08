@@ -44,6 +44,13 @@ def create_dispatcher(
     """Create and configure the aiogram Dispatcher with lifecycle handlers."""
     dp = Dispatcher()
 
+    # Register dependencies in dispatcher workflow data for clean handler injection
+    dp["settings"] = settings
+    if db_manager is not None:
+        dp["db_manager"] = db_manager
+    if redis_manager is not None:
+        dp["redis_manager"] = redis_manager
+
     setup_middlewares(dp)
     setup_routers(dp)
 

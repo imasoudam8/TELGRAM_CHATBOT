@@ -1,10 +1,11 @@
-"""Base bot handlers providing minimal connectivity smoke test."""
+"""Base bot handlers providing core application routing."""
 
 import logging
 
 from aiogram import Router
-from aiogram.filters import CommandStart
 from aiogram.types import Message
+
+from src.app.bot.handlers.onboarding import get_onboarding_router
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +13,7 @@ logger = logging.getLogger(__name__)
 async def handle_start_smoke_test(message: Message) -> None:
     """Handle /start command strictly as a connectivity verification smoke test.
 
-    No user registration, database record creation, or state persistence is performed.
+    Retained for backward-compatibility in diagnostic tests.
     """
     user_id = message.from_user.id if message.from_user else "unknown"
     logger.info("Received /start smoke test from user %s", user_id)
@@ -25,9 +26,9 @@ async def handle_start_smoke_test(message: Message) -> None:
 
 
 def get_base_router() -> Router:
-    """Factory creating a new base router instance."""
+    """Factory creating the primary application router."""
     router = Router(name="base")
-    router.message.register(handle_start_smoke_test, CommandStart())
+    router.include_router(get_onboarding_router())
     return router
 
 
