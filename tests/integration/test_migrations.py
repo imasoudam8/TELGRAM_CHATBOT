@@ -1,8 +1,5 @@
 """Integration tests for Alembic migration environment and PostgreSQL execution."""
 
-import os
-import socket
-import uuid
 from pathlib import Path
 
 import pytest
@@ -16,20 +13,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from src.app.config.settings import Settings, get_settings
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
-
-
-def is_service_reachable(host: str, port: int) -> bool:
-    """Check if a TCP port is open and accepting connections."""
-    try:
-        with socket.create_connection((host, port), timeout=1.0):
-            return True
-    except (OSError, TimeoutError):
-        return False
-
-
-def is_ci_environment() -> bool:
-    """Detect whether tests are executing within a CI environment."""
-    return os.getenv("CI", "").lower() in ("true", "1") or os.getenv("GITHUB_ACTIONS") == "true"
 
 
 def test_alembic_script_directory_discovery() -> None:
@@ -71,6 +54,7 @@ def test_alembic_offline_sql_generation(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_live_postgres_alembic_migration_lifecycle(
+    disposable_postgres_db: tuple[str, Settings],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Execute 'alembic upgrade head' and 'alembic downgrade base' on live PostgreSQL 16.
@@ -82,36 +66,8 @@ async def test_live_postgres_alembic_migration_lifecycle(
     4. Database constraint enforcement (age eligibility, append-only trigger rejection).
     5. Clean migration teardown via 'alembic downgrade base'.
     """
-    settings = Settings()
-    if not is_ci_environment() and not is_service_reachable(
-        settings.POSTGRES_HOST, settings.POSTGRES_PORT
-    ):
-        pytest.skip(
-            f"PostgreSQL service not reachable on {settings.POSTGRES_HOST}:"
-            f"{settings.POSTGRES_PORT} (local test environment)"
-        )
-
-    db_suffix = uuid.uuid4().hex[:8]
-    disposable_db_name = f"test_migration_{db_suffix}"
-
+    disposable_db_name, settings = disposable_postgres_db
     raw_password = settings.POSTGRES_PASSWORD.get_secret_value()
-
-    admin_url = URL.create(
-        drivername="postgresql+asyncpg",
-        username=settings.POSTGRES_USER,
-        password=raw_password,
-        host=settings.POSTGRES_HOST,
-        port=settings.POSTGRES_PORT,
-        database=settings.POSTGRES_DB,
-    ).render_as_string(hide_password=False)
-
-    admin_engine = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
-
-    # 1. Create disposable PostgreSQL test database
-    async with admin_engine.connect() as conn:
-        await conn.execute(
-            text(f'CREATE DATABASE "{disposable_db_name}" WITH OWNER "{settings.POSTGRES_USER}";')
-        )
 
     disposable_async_url = URL.create(
         drivername="postgresql+asyncpg",
@@ -122,20 +78,19 @@ async def test_live_postgres_alembic_migration_lifecycle(
         database=disposable_db_name,
     ).render_as_string(hide_password=False)
 
+    monkeypatch.setenv("POSTGRES_DB", disposable_db_name)
+    get_settings.cache_clear()
+
+    alembic_cfg = Config(str(PROJECT_ROOT / "alembic.ini"))
+    alembic_cfg.set_main_option("script_location", str(PROJECT_ROOT / "migrations"))
+    alembic_cfg.set_main_option("sqlalchemy.url", disposable_async_url)
+
+    # 1. Execute alembic upgrade head
+    command.upgrade(alembic_cfg, "head")
+
+    test_engine = create_async_engine(disposable_async_url)
+
     try:
-        # 2. Reconfigure settings & Alembic config to target disposable DB
-        monkeypatch.setenv("POSTGRES_DB", disposable_db_name)
-        get_settings.cache_clear()
-
-        alembic_cfg = Config(str(PROJECT_ROOT / "alembic.ini"))
-        alembic_cfg.set_main_option("script_location", str(PROJECT_ROOT / "migrations"))
-        alembic_cfg.set_main_option("sqlalchemy.url", disposable_async_url)
-
-        # 3. Execute alembic upgrade head
-        command.upgrade(alembic_cfg, "head")
-
-        test_engine = create_async_engine(disposable_async_url)
-
         async with test_engine.connect() as conn:
             # Verify all 18 domain tables + alembic_version exist
             res = await conn.execute(
@@ -296,10 +251,10 @@ async def test_live_postgres_alembic_migration_lifecycle(
 
         await test_engine.dispose()
 
-        # 4. Execute alembic downgrade base
+        # 2. Execute alembic downgrade base
         command.downgrade(alembic_cfg, "base")
 
-        # 5. Verify all migration tables dropped cleanly
+        # 3. Verify all migration tables dropped cleanly
         test_engine_downgraded = create_async_engine(disposable_async_url)
         async with test_engine_downgraded.connect() as conn:
             res = await conn.execute(
@@ -315,10 +270,4 @@ async def test_live_postgres_alembic_migration_lifecycle(
         await test_engine_downgraded.dispose()
 
     finally:
-        # Cleanup settings cache and drop disposable database
         get_settings.cache_clear()
-        async with admin_engine.connect() as conn:
-            await conn.execute(
-                text(f'DROP DATABASE IF EXISTS "{disposable_db_name}" WITH (FORCE);')
-            )
-        await admin_engine.dispose()

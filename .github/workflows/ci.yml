@@ -84,6 +84,18 @@ jobs:
         run: |
           python -m compileall src tests
 
-      - name: Run Test Suite
+      - name: Run Standard Test Suite
         run: |
           pytest -v
+
+      - name: Run Test Suite (Random Order Pass 1 - Seed 12345)
+        run: |
+          pytest -v --random-order-seed=12345
+
+      - name: Run Test Suite (Random Order Pass 2 - Seed 67890)
+        run: |
+          pytest -v --random-order-seed=67890
+
+      - name: Run Test Suite (Random Order Pass 3 - Seed 99999)
+        run: |
+          pytest -v --random-order-seed=99999

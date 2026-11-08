@@ -12,12 +12,16 @@ from src.app.infrastructure.redis.client import RedisManager
 from src.app.infrastructure.telegram.bot import create_bot, create_dispatcher
 
 
-def test_create_bot_initialization(test_settings: Settings) -> None:
+@pytest.mark.asyncio
+async def test_create_bot_initialization(test_settings: Settings) -> None:
     """Verify bot client is created with HTML parse mode and configured token."""
     bot = create_bot(test_settings)
-    assert isinstance(bot, Bot)
-    assert bot.token == test_settings.BOT_TOKEN.get_secret_value()
-    assert bot.default.parse_mode == ParseMode.HTML
+    try:
+        assert isinstance(bot, Bot)
+        assert bot.token == test_settings.BOT_TOKEN.get_secret_value()
+        assert bot.default.parse_mode == ParseMode.HTML
+    finally:
+        await bot.session.close()
 
 
 @pytest.mark.asyncio

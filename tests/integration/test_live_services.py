@@ -80,22 +80,15 @@ async def test_live_redis_connectivity(live_service_settings: Settings) -> None:
 
 @pytest.mark.asyncio
 async def test_live_postgres_session_commit_and_rollback(
-    live_service_settings: Settings,
+    disposable_postgres_db: tuple[str, Settings],
 ) -> None:
     """Verify live PostgreSQL transaction commit and rollback behavior using DatabaseManager."""
-    if not is_ci_environment() and not is_service_reachable(
-        live_service_settings.POSTGRES_HOST, live_service_settings.POSTGRES_PORT
-    ):
-        pytest.skip(
-            f"PostgreSQL service not reachable on {live_service_settings.POSTGRES_HOST}:"
-            f"{live_service_settings.POSTGRES_PORT} (local test environment)"
-        )
-
+    _, disposable_settings = disposable_postgres_db
     import uuid
 
     from sqlalchemy import text
 
-    manager = DatabaseManager(live_service_settings)
+    manager = DatabaseManager(disposable_settings)
     await manager.initialize()
 
     table_name = f"test_trans_{uuid.uuid4().hex[:8]}"
@@ -196,82 +189,25 @@ async def test_live_redis_operations(live_service_settings: Settings) -> None:
 
 
 @pytest.mark.asyncio
-async def test_live_postgres_user_registration(live_service_settings: Settings) -> None:
+async def test_live_postgres_user_registration(
+    migrated_postgres_db: tuple[str, Settings],
+) -> None:
     """Verify live PostgreSQL 16 user registration and age declaration in isolated DB."""
-    if not is_ci_environment() and not is_service_reachable(
-        live_service_settings.POSTGRES_HOST, live_service_settings.POSTGRES_PORT
-    ):
-        pytest.skip(
-            f"PostgreSQL service not reachable on {live_service_settings.POSTGRES_HOST}:"
-            f"{live_service_settings.POSTGRES_PORT} (local test environment)"
-        )
+    _, disposable_settings = migrated_postgres_db
 
     import random
-    import uuid
-    from pathlib import Path
     from zoneinfo import ZoneInfo
 
-    from alembic import command
-    from alembic.config import Config
     from sqlalchemy import select, text
-    from sqlalchemy.engine import URL
     from sqlalchemy.exc import SQLAlchemyError
-    from sqlalchemy.ext.asyncio import create_async_engine
 
     from src.app.modules.users.models import User
     from src.app.modules.users.service import UserService
 
-    project_root = Path(__file__).parent.parent.parent
-    db_suffix = uuid.uuid4().hex[:8]
-    disposable_db_name = f"test_user_reg_{db_suffix}"
-
-    raw_password = live_service_settings.POSTGRES_PASSWORD.get_secret_value()
-
-    admin_url = URL.create(
-        drivername="postgresql+asyncpg",
-        username=live_service_settings.POSTGRES_USER,
-        password=raw_password,
-        host=live_service_settings.POSTGRES_HOST,
-        port=live_service_settings.POSTGRES_PORT,
-        database=live_service_settings.POSTGRES_DB,
-    ).render_as_string(hide_password=False)
-
-    admin_engine = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
-
-    # 1. Create disposable database
-    async with admin_engine.connect() as conn:
-        await conn.execute(
-            text(
-                f'CREATE DATABASE "{disposable_db_name}" '
-                f'WITH OWNER "{live_service_settings.POSTGRES_USER}";'
-            )
-        )
-
-    disposable_async_url = URL.create(
-        drivername="postgresql+asyncpg",
-        username=live_service_settings.POSTGRES_USER,
-        password=raw_password,
-        host=live_service_settings.POSTGRES_HOST,
-        port=live_service_settings.POSTGRES_PORT,
-        database=disposable_db_name,
-    ).render_as_string(hide_password=False)
-
-    disposable_settings = live_service_settings.model_copy(
-        update={"POSTGRES_DB": disposable_db_name}
-    )
-    manager: DatabaseManager | None = None
+    manager = DatabaseManager(disposable_settings)
+    await manager.initialize()
 
     try:
-        # 2. Run Alembic migrations against disposable database
-        alembic_cfg = Config(str(project_root / "alembic.ini"))
-        alembic_cfg.set_main_option("script_location", str(project_root / "migrations"))
-        alembic_cfg.set_main_option("sqlalchemy.url", disposable_async_url)
-        command.upgrade(alembic_cfg, "head")
-
-        # 3. Create DatabaseManager targeting disposable database
-        manager = DatabaseManager(disposable_settings)
-        await manager.initialize()
-
         user_service = UserService(manager)
         test_telegram_id = random.randint(1_000_000, 9_999_999_999)
         tehran_tz = ZoneInfo("Asia/Tehran")
@@ -310,14 +246,5 @@ async def test_live_postgres_user_registration(live_service_settings: Settings) 
                             f"VALUES ({test_telegram_id}, 'usr_dummy_collision', 'ACTIVE', TRUE)"
                         )
                     )
-
     finally:
-        # Step 5: Clean up manager and drop disposable database
-        if manager is not None:
-            await manager.close()
-
-        async with admin_engine.connect() as conn:
-            await conn.execute(
-                text(f'DROP DATABASE IF EXISTS "{disposable_db_name}" WITH (FORCE);')
-            )
-        await admin_engine.dispose()
+        await manager.close()
