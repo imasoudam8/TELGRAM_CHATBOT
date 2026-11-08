@@ -32,9 +32,26 @@ class SensitiveDataFilter(logging.Filter):
 
     def __init__(self, additional_secrets: list[str] | None = None) -> None:
         super().__init__()
-        self._exact_secrets: set[str] = {
-            s.strip() for s in (additional_secrets or []) if s and len(s.strip()) > 3
-        }
+        self._exact_secrets: set[str] = set()
+        self._exact_tokens: set[str] = set()
+        for s in additional_secrets or []:
+            if not s:
+                continue
+            cleaned = s.strip()
+            if len(cleaned) <= 3:
+                continue
+            if self._is_telegram_token(cleaned):
+                self._exact_tokens.add(cleaned)
+            else:
+                self._exact_secrets.add(cleaned)
+
+    @staticmethod
+    def _is_telegram_token(secret: str) -> bool:
+        """Determine if a secret string corresponds to a Telegram bot token."""
+        return bool(
+            SENSITIVE_PATTERNS[0].search(secret)
+            or re.match(r"^\d{6,14}:[A-Za-z0-9_-]{20,60}$", secret)
+        )
 
     def filter(self, record: logging.LogRecord) -> bool:
         if isinstance(record.msg, str):
@@ -51,11 +68,7 @@ class SensitiveDataFilter(logging.Filter):
         if not text:
             return text
 
-        # Exact secrets check
-        for secret in self._exact_secrets:
-            text = text.replace(secret, "[REDACTED]")
-
-        # Pattern redaction
+        # 1. Pattern redactions first: known structured patterns take precedence
         # Telegram Bot Token
         text = SENSITIVE_PATTERNS[0].sub("[REDACTED_BOT_TOKEN]", text)
         # DB URI password
@@ -64,6 +77,14 @@ class SensitiveDataFilter(logging.Filter):
         text = SENSITIVE_PATTERNS[2].sub(r"redis://:[REDACTED_REDIS_PASSWORD]@", text)
         # Bearer token
         text = SENSITIVE_PATTERNS[3].sub(r"\1[REDACTED_BEARER_TOKEN]", text)
+
+        # 2. Exact Telegram bot tokens (ensures registered bot tokens retain [REDACTED_BOT_TOKEN])
+        for token in self._exact_tokens:
+            text = text.replace(token, "[REDACTED_BOT_TOKEN]")
+
+        # 3. Exact secrets check for arbitrary credentials not matching known patterns
+        for secret in self._exact_secrets:
+            text = text.replace(secret, "[REDACTED]")
 
         return text
 

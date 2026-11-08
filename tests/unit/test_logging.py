@@ -52,6 +52,20 @@ def test_sensitive_data_filter_redacts_exact_known_secrets() -> None:
     assert "[REDACTED]" in sanitized
 
 
+def test_sensitive_data_filter_exact_secret_retains_bot_token_label() -> None:
+    """Verify known Telegram token in additional_secrets retains specific bot token label."""
+    token = "123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ_CUSTOM_TOKEN"
+    arbitrary_secret = "arbitrary_external_secret_token_12345"
+    filter_ = SensitiveDataFilter(additional_secrets=[token, arbitrary_secret])
+    raw_text = f"Payload with token {token} and secret {arbitrary_secret}"
+    sanitized = filter_.redact(raw_text)
+
+    assert token not in sanitized
+    assert arbitrary_secret not in sanitized
+    assert "[REDACTED_BOT_TOKEN]" in sanitized
+    assert "[REDACTED]" in sanitized
+
+
 def test_structured_json_formatter_produces_valid_json() -> None:
     """Verify JSON log formatter creates schema-compliant JSON strings."""
     formatter = StructuredJsonFormatter()
