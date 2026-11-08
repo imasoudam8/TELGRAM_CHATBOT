@@ -201,3 +201,39 @@ async def test_graceful_shutdown_on_cancellation(test_settings: Settings) -> Non
     mock_bot.session.close.assert_awaited_once()
     mock_redis.close.assert_awaited_once()
     mock_db.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_single_ownership_exactly_once_resource_cleanup(test_settings: Settings) -> None:
+    """Verify resources are closed exactly once when both Dispatcher shutdown and lifespan run."""
+    mock_db = MagicMock(spec=DatabaseManager)
+    mock_db.initialize = AsyncMock()
+    mock_db.validate_connection = AsyncMock(return_value=True)
+    mock_db.close = AsyncMock()
+
+    mock_redis = MagicMock(spec=RedisManager)
+    mock_redis.initialize = AsyncMock()
+    mock_redis.validate_connection = AsyncMock(return_value=True)
+    mock_redis.close = AsyncMock()
+
+    mock_bot = MagicMock(spec=Bot)
+    mock_bot.session = MagicMock()
+    mock_bot.session.close = AsyncMock()
+
+    with patch("src.app.infrastructure.lifecycle.create_bot", return_value=mock_bot):
+        async with application_lifespan(
+            test_settings,
+            db_manager=mock_db,
+            redis_manager=mock_redis,
+        ) as ctx:
+            # Simulate Dispatcher emitting shutdown during polling teardown
+            await ctx.dispatcher.emit_shutdown(bot=ctx.bot)
+            # Dispatcher hook must NOT dispose resources
+            mock_bot.session.close.assert_not_called()
+            mock_redis.close.assert_not_called()
+            mock_db.close.assert_not_called()
+
+    # After lifespan context finishes, resources MUST be closed exactly once
+    mock_bot.session.close.assert_awaited_once()
+    mock_redis.close.assert_awaited_once()
+    mock_db.close.assert_awaited_once()

@@ -76,3 +76,120 @@ async def test_live_redis_connectivity(live_service_settings: Settings) -> None:
         assert is_healthy is True
     finally:
         await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_live_postgres_session_commit_and_rollback(
+    live_service_settings: Settings,
+) -> None:
+    """Verify live PostgreSQL transaction commit and rollback behavior using DatabaseManager."""
+    if not is_ci_environment() and not is_service_reachable(
+        live_service_settings.POSTGRES_HOST, live_service_settings.POSTGRES_PORT
+    ):
+        pytest.skip(
+            f"PostgreSQL service not reachable on {live_service_settings.POSTGRES_HOST}:"
+            f"{live_service_settings.POSTGRES_PORT} (local test environment)"
+        )
+
+    import uuid
+
+    from sqlalchemy import text
+
+    manager = DatabaseManager(live_service_settings)
+    await manager.initialize()
+
+    table_name = f"test_trans_{uuid.uuid4().hex[:8]}"
+
+    try:
+        # Step 1: Create an isolated temporary test table
+        async with manager.session() as session:
+            await session.execute(
+                text(f"CREATE TABLE {table_name} (id INT PRIMARY KEY, val TEXT NOT NULL)")
+            )
+
+        # Step 2 & 3: Insert record 1 and exit normally (auto-commit)
+        async with manager.session() as session:
+            await session.execute(
+                text(f"INSERT INTO {table_name} (id, val) VALUES (1, 'committed_record')")
+            )
+
+        # Step 4: Verify record 1 was committed using a separate session
+        async with manager.session() as session:
+            res = await session.execute(text(f"SELECT val FROM {table_name} WHERE id = 1"))
+            assert res.scalar_one() == "committed_record"
+
+        # Step 5: Insert record 2 and deliberately raise an exception to trigger rollback
+        with pytest.raises(RuntimeError, match="Deliberate error for rollback test"):
+            async with manager.session() as session:
+                await session.execute(
+                    text(f"INSERT INTO {table_name} (id, val) VALUES (2, 'uncommitted_record')")
+                )
+                raise RuntimeError("Deliberate error for rollback test")
+
+        # Step 6: Verify record 2 was rolled back and record 1 remains intact
+        async with manager.session() as session:
+            res2 = await session.execute(text(f"SELECT val FROM {table_name} WHERE id = 2"))
+            assert res2.scalar_one_or_none() is None
+
+            res1 = await session.execute(text(f"SELECT val FROM {table_name} WHERE id = 1"))
+            assert res1.scalar_one() == "committed_record"
+
+    finally:
+        # Step 7: Guaranteed cleanup: drop the temporary table and close manager
+        try:
+            async with manager.session() as session:
+                await session.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+        except Exception:
+            pass
+        await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_live_redis_operations(live_service_settings: Settings) -> None:
+    """Verify live Redis operations: SET with TTL, GET, positive TTL check, and DELETE."""
+    if not is_ci_environment() and not is_service_reachable(
+        live_service_settings.REDIS_HOST, live_service_settings.REDIS_PORT
+    ):
+        pytest.skip(
+            f"Redis service not reachable on {live_service_settings.REDIS_HOST}:"
+            f"{live_service_settings.REDIS_PORT} (local test environment)"
+        )
+
+    import uuid
+
+    manager = RedisManager(live_service_settings)
+    await manager.initialize()
+
+    test_key = f"test:coordination:{uuid.uuid4().hex[:8]}"
+    test_value = "coord_payload_verified"
+    ttl_seconds = 120
+
+    try:
+        # Step 1: Set uniquely namespaced test key with TTL
+        await manager.client.set(test_key, test_value, ex=ttl_seconds)
+
+        # Step 2: Read it back and verify value
+        retrieved = await manager.client.get(test_key)
+        assert retrieved == test_value
+
+        # Step 3: Verify TTL is positive and does not exceed configured expiration
+        ttl = await manager.client.ttl(test_key)
+        assert 0 < ttl <= ttl_seconds
+
+        # Step 4: Delete the test key
+        deleted = await manager.client.delete(test_key)
+        assert deleted == 1
+
+        # Verify key no longer exists
+        assert await manager.client.get(test_key) is None
+    finally:
+        # Step 5: Guaranteed cleanup
+        try:
+            await manager.client.delete(test_key)
+        except Exception:
+            pass
+        await manager.close()
+
+    # Step 6: Verify Redis manager closed cleanly
+    assert manager._client is None
+    assert manager._pool is None

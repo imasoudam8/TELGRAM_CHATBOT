@@ -184,7 +184,14 @@ class Settings(BaseSettings):
                 raise ValueError("Production environment cannot use example or test bot tokens.")
 
             raw_db_pass = self.POSTGRES_PASSWORD.get_secret_value()
-            if raw_db_pass in {"postgres", "password", "root", "admin", "123456"}:
+            if raw_db_pass in {
+                "postgres",
+                "password",
+                "root",
+                "admin",
+                "123456",
+                "postgres_secure_dev_password",
+            }:
                 raise ValueError(
                     "Production environment must not use trivial or default database passwords."
                 )

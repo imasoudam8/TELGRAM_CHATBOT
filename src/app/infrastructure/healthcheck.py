@@ -8,7 +8,7 @@ from typing import Any
 
 from src.app.config.settings import Settings, get_settings
 from src.app.infrastructure.database.session import DatabaseManager
-from src.app.infrastructure.logging.logger import configure_logging
+from src.app.infrastructure.logging.logger import SensitiveDataFilter, configure_logging
 from src.app.infrastructure.redis.client import RedisManager
 
 logger = logging.getLogger("healthcheck")
@@ -20,6 +20,14 @@ async def run_health_checks(settings: Settings) -> tuple[bool, dict[str, Any]]:
     Returns:
         tuple[bool, dict]: (is_healthy, details_dict)
     """
+    known_secrets = [
+        settings.BOT_TOKEN.get_secret_value(),
+        settings.POSTGRES_PASSWORD.get_secret_value(),
+    ]
+    if settings.REDIS_PASSWORD:
+        known_secrets.append(settings.REDIS_PASSWORD.get_secret_value())
+    scrubber = SensitiveDataFilter(additional_secrets=known_secrets)
+
     db_manager = DatabaseManager(settings)
     redis_manager = RedisManager(settings)
 
@@ -39,20 +47,32 @@ async def run_health_checks(settings: Settings) -> tuple[bool, dict[str, Any]]:
         results["database"] = {"status": "healthy", "engine": "postgresql+asyncpg"}
         db_healthy = True
     except Exception as exc:
-        results["database"] = {"status": "unhealthy", "error": str(exc)}
+        results["database"] = {"status": "unhealthy", "error": scrubber.redact(str(exc))}
     finally:
-        await db_manager.close()
+        try:
+            await db_manager.close()
+        except Exception as exc:
+            logger.warning(
+                "Error closing DatabaseManager during healthcheck: %s",
+                scrubber.redact(str(exc)),
+            )
 
-    # Check Redis
+    # Check Redis (always executed even if PostgreSQL validation or cleanup fails)
     try:
         await redis_manager.initialize()
         await redis_manager.validate_connection()
         results["redis"] = {"status": "healthy"}
         redis_healthy = True
     except Exception as exc:
-        results["redis"] = {"status": "unhealthy", "error": str(exc)}
+        results["redis"] = {"status": "unhealthy", "error": scrubber.redact(str(exc))}
     finally:
-        await redis_manager.close()
+        try:
+            await redis_manager.close()
+        except Exception as exc:
+            logger.warning(
+                "Error closing RedisManager during healthcheck: %s",
+                scrubber.redact(str(exc)),
+            )
 
     all_healthy = db_healthy and redis_healthy
     results["status"] = "healthy" if all_healthy else "unhealthy"

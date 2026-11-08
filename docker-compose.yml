@@ -28,7 +28,7 @@ services:
       --save 60 1000
       --appendonly yes
       --maxmemory 256mb
-      --maxmemory-policy allkeys-lru
+      --maxmemory-policy noeviction
     volumes:
       - redis_data:/data
     networks:

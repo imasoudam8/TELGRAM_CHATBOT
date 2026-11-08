@@ -46,8 +46,9 @@ async def test_dispatcher_lifecycle_hooks(test_settings: Settings) -> None:
     mock_db.validate_connection.assert_awaited_once()
     mock_redis.validate_connection.assert_awaited_once()
 
-    # Trigger shutdown hook
+    # Trigger shutdown hook - verify dispatcher shutdown does not independently close resources
+    # owned by application_lifespan
     await dp.emit_shutdown(bot=mock_bot)
-    mock_bot.session.close.assert_awaited_once()
-    mock_redis.close.assert_awaited_once()
-    mock_db.close.assert_awaited_once()
+    mock_bot.session.close.assert_not_called()
+    mock_redis.close.assert_not_called()
+    mock_db.close.assert_not_called()

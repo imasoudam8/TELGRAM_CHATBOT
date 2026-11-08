@@ -79,28 +79,9 @@ def create_dispatcher(
     @dp.shutdown()
     async def on_shutdown(bot: Bot) -> None:
         logger.info("Shutting down Telegram Bot application gracefully...")
-
-        # Close Telegram bot session
-        try:
-            await bot.session.close()
-            logger.info("Telegram Bot session closed.")
-        except Exception as exc:
-            logger.error("Error closing Telegram bot session: %s", exc)
-
-        # Disconnect Redis
-        if redis_manager is not None:
-            try:
-                await redis_manager.close()
-            except Exception as exc:
-                logger.error("Error closing Redis manager: %s", exc)
-
-        # Dispose database engine
-        if db_manager is not None:
-            try:
-                await db_manager.close()
-            except Exception as exc:
-                logger.error("Error closing Database manager: %s", exc)
-
-        logger.info("Application shutdown completed.")
+        # Note: Resource lifecycle (Bot session, RedisManager, and DatabaseManager cleanup)
+        # is authoritatively owned by application_lifespan to guarantee single-owner,
+        # exactly-once teardown.
+        logger.info("Application shutdown hook completed.")
 
     return dp
