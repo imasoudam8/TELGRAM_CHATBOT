@@ -1,4 +1,4 @@
-"""Keyboards package for Telegram UI markup."""
+"""Keyboards package exports."""
 
 from src.app.bot.keyboards.onboarding import (
     AGE_CONFIRM_TEXT,
@@ -16,6 +16,28 @@ from src.app.bot.keyboards.onboarding import (
     get_age_declaration_keyboard,
     get_main_menu_keyboard,
 )
+from src.app.bot.keyboards.profile import (
+    CB_BACK_TO_MAIN_MENU,
+    CB_BACK_TO_PROFILE,
+    CB_CANCEL_WIZARD,
+    CB_CONFIRM_CREATE,
+    CB_EDIT_AGE,
+    CB_EDIT_BIO,
+    CB_EDIT_CITY,
+    CB_EDIT_GENDER,
+    CB_EDIT_NAME,
+    CB_GENDER_PREFIX,
+    CB_SKIP_BIO,
+    CB_SKIP_CITY,
+    CB_START_CREATE,
+    GENDER_LABELS,
+    get_cancel_edit_keyboard,
+    get_gender_selection_keyboard,
+    get_no_profile_keyboard,
+    get_review_keyboard,
+    get_skip_keyboard,
+    get_view_profile_keyboard,
+)
 
 __all__ = [
     "AGE_CONFIRM_TEXT",
@@ -29,7 +51,27 @@ __all__ = [
     "BTN_WALLET",
     "CALLBACK_AGE_CONFIRM",
     "CALLBACK_AGE_DECLINE",
+    "CB_BACK_TO_MAIN_MENU",
+    "CB_BACK_TO_PROFILE",
+    "CB_CANCEL_WIZARD",
+    "CB_CONFIRM_CREATE",
+    "CB_EDIT_AGE",
+    "CB_EDIT_BIO",
+    "CB_EDIT_CITY",
+    "CB_EDIT_GENDER",
+    "CB_EDIT_NAME",
+    "CB_GENDER_PREFIX",
+    "CB_SKIP_BIO",
+    "CB_SKIP_CITY",
+    "CB_START_CREATE",
+    "GENDER_LABELS",
     "MAIN_MENU_BUTTONS",
     "get_age_declaration_keyboard",
+    "get_cancel_edit_keyboard",
+    "get_gender_selection_keyboard",
     "get_main_menu_keyboard",
+    "get_no_profile_keyboard",
+    "get_review_keyboard",
+    "get_skip_keyboard",
+    "get_view_profile_keyboard",
 ]

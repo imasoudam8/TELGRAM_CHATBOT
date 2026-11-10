@@ -22,11 +22,11 @@ def test_alembic_script_directory_discovery() -> None:
 
     head = script_dir.get_current_head()
     assert head is not None, "Alembic head revision is missing"
-    assert head == "e0d35e865fec", f"Unexpected Alembic head revision: {head}"
+    assert head == "1bd79760419b", f"Unexpected Alembic head revision: {head}"
 
     revision_script = script_dir.get_revision(head)
     assert revision_script is not None
-    assert "initial_schema" in revision_script.doc
+    assert "replace_birth_date_with_age" in revision_script.doc
 
 
 def test_alembic_offline_sql_generation(tmp_path: Path) -> None:
@@ -190,28 +190,43 @@ async def test_live_postgres_alembic_migration_lifecycle(
             assert age_declared_at is not None
             assert age_declared_date is not None
 
-            # Exercise invalid profile INSERT (age < 18 -> trigger failure)
+            # Exercise invalid profile INSERT (age < 18 -> constraint failure)
             with pytest.raises(Exception) as exc_info:
                 async with conn.begin_nested():
                     await conn.execute(
                         text(
                             "INSERT INTO user_profiles (user_id, age_18_plus_declared, "
-                            "age_declared_date, birth_date, display_name, gender, city, "
+                            "age_declared_date, age, display_name, gender, city, "
                             f"completion_status, visibility) VALUES ({user_id}, TRUE, "
-                            f"'{age_declared_date}', CURRENT_DATE - INTERVAL '10 years', "
+                            f"'{age_declared_date}', 16, "
                             "'Minor User', 'MALE', 'Tehran', 'COMPLETED', 'PUBLIC');"
                         )
                     )
             err_msg = str(exc_info.value).lower()
-            assert "18 years" in err_msg or "age" in err_msg
+            assert "chk_user_profiles_age_range" in err_msg or "age" in err_msg
 
-            # Exercise valid profile INSERT (age >= 18 -> success)
+            # Exercise invalid profile INSERT (age > 99 -> constraint failure)
+            with pytest.raises(Exception) as exc_info:
+                async with conn.begin_nested():
+                    await conn.execute(
+                        text(
+                            "INSERT INTO user_profiles (user_id, age_18_plus_declared, "
+                            "age_declared_date, age, display_name, gender, city, "
+                            f"completion_status, visibility) VALUES ({user_id}, TRUE, "
+                            f"'{age_declared_date}', 105, "
+                            "'Elder User', 'MALE', 'Tehran', 'COMPLETED', 'PUBLIC');"
+                        )
+                    )
+            err_msg = str(exc_info.value).lower()
+            assert "chk_user_profiles_age_range" in err_msg or "age" in err_msg
+
+            # Exercise valid profile INSERT (age 18-99 -> success)
             await conn.execute(
                 text(
                     "INSERT INTO user_profiles (user_id, age_18_plus_declared, "
-                    "age_declared_date, birth_date, display_name, gender, city, "
+                    "age_declared_date, age, display_name, gender, city, "
                     f"completion_status, visibility) VALUES ({user_id}, TRUE, "
-                    f"'{age_declared_date}', CURRENT_DATE - INTERVAL '25 years', "
+                    f"'{age_declared_date}', 25, "
                     "'Adult User', 'MALE', 'Tehran', 'COMPLETED', 'PUBLIC');"
                 )
             )

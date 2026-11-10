@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Integer,
     SmallInteger,
     String,
     Text,
@@ -178,8 +179,8 @@ class UserProfile(Base):
         Date,
         nullable=False,
     )
-    birth_date: Mapped[date] = mapped_column(
-        Date,
+    age: Mapped[int] = mapped_column(
+        Integer,
         nullable=False,
     )
     display_name: Mapped[str] = mapped_column(
@@ -241,8 +242,8 @@ class UserProfile(Base):
             name="chk_user_profiles_age_declared_true",
         ),
         CheckConstraint(
-            "birth_date <= (age_declared_date - INTERVAL '18 years')",
-            name="chk_user_profiles_birth_date_18_plus",
+            "age >= 18 AND age <= 99",
+            name="chk_user_profiles_age_range",
         ),
         CheckConstraint(
             "gender IN ('MALE', 'FEMALE', 'NON_BINARY', 'OTHER')",

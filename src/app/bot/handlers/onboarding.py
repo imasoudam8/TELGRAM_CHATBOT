@@ -8,6 +8,7 @@ from aiogram.types import CallbackQuery, Message
 
 from src.app.bot.keyboards.onboarding import (
     BTN_HELP_SUPPORT,
+    BTN_MY_PROFILE,
     CALLBACK_AGE_CONFIRM,
     CALLBACK_AGE_DECLINE,
     MAIN_MENU_BUTTONS,
@@ -225,5 +226,7 @@ def get_onboarding_router() -> Router:
     router.message.register(handle_start, CommandStart())
     router.callback_query.register(handle_age_confirm_callback, F.data == CALLBACK_AGE_CONFIRM)
     router.callback_query.register(handle_age_decline_callback, F.data == CALLBACK_AGE_DECLINE)
-    router.message.register(handle_main_menu_entry, F.text.in_(MAIN_MENU_BUTTONS))
+    # Exclude BTN_MY_PROFILE so it is handled by the dedicated profile router
+    other_menu_buttons = [btn for btn in MAIN_MENU_BUTTONS if btn != BTN_MY_PROFILE]
+    router.message.register(handle_main_menu_entry, F.text.in_(other_menu_buttons))
     return router

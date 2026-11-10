@@ -47,7 +47,11 @@ select = [
     "B",   # flake8-bugbear
     "RUF", # ruff-specific rules
 ]
-ignore = []
+ignore = [
+    "RUF001", # ambiguous-unicode-character-string (Persian digits & typography)
+    "RUF002", # ambiguous-unicode-character-docstring
+    "RUF003", # ambiguous-unicode-character-comment
+]
 
 [tool.ruff.lint.per-file-ignores]
 "migrations/*" = ["E501"]

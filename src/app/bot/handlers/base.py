@@ -6,6 +6,7 @@ from aiogram import Router
 from aiogram.types import Message
 
 from src.app.bot.handlers.onboarding import get_onboarding_router
+from src.app.bot.handlers.profile import get_profile_router
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ def get_base_router() -> Router:
     """Factory creating the primary application router."""
     router = Router(name="base")
     router.include_router(get_onboarding_router())
+    router.include_router(get_profile_router())
     return router
 
 

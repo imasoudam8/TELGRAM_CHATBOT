@@ -111,7 +111,7 @@ async def test_user_and_profile_relationship(sqlite_session: AsyncSession) -> No
         user_id=user.id,
         age_18_plus_declared=True,
         age_declared_date=today,
-        birth_date=today - timedelta(days=365 * 25),
+        age=25,
         display_name="Test User",
         gender="MALE",
         city="Tehran",
