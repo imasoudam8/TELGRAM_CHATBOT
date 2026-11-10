@@ -248,14 +248,15 @@ async def test_live_postgres_alembic_migration_lifecycle(
                         text(f"DELETE FROM wallet_ledgers WHERE wallet_user_id = {user_id};")
                     )
             assert "append-only" in str(exc_info.value).lower()
-
+    finally:
         await test_engine.dispose()
 
-        # 2. Execute alembic downgrade base
-        command.downgrade(alembic_cfg, "base")
+    # 2. Execute alembic downgrade base
+    command.downgrade(alembic_cfg, "base")
 
-        # 3. Verify all migration tables dropped cleanly
-        test_engine_downgraded = create_async_engine(disposable_async_url)
+    # 3. Verify all migration tables dropped cleanly
+    test_engine_downgraded = create_async_engine(disposable_async_url)
+    try:
         async with test_engine_downgraded.connect() as conn:
             res = await conn.execute(
                 text(
@@ -267,7 +268,5 @@ async def test_live_postgres_alembic_migration_lifecycle(
             assert len(remaining_tables) == 0, (
                 f"Migration downgrade left remaining tables: {remaining_tables}"
             )
-        await test_engine_downgraded.dispose()
-
     finally:
-        get_settings.cache_clear()
+        await test_engine_downgraded.dispose()

@@ -108,23 +108,57 @@ async def disposable_postgres_db() -> AsyncGenerator[tuple[str, Settings], None]
     ).render_as_string(hide_password=False)
 
     admin_engine = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
-
-    async with admin_engine.connect() as conn:
-        await conn.execute(
-            text(f'CREATE DATABASE "{disposable_db_name}" WITH OWNER "{settings.POSTGRES_USER}";')
-        )
-
-    disposable_settings = settings.model_copy(update={"POSTGRES_DB": disposable_db_name})
+    db_created = False
+    cleanup_failures: list[Exception] = []
 
     try:
+        async with admin_engine.connect() as conn:
+            await conn.execute(
+                text(
+                    f'CREATE DATABASE "{disposable_db_name}" WITH OWNER "{settings.POSTGRES_USER}";'
+                )
+            )
+        db_created = True
+
+        disposable_settings = settings.model_copy(update={"POSTGRES_DB": disposable_db_name})
         yield disposable_db_name, disposable_settings
     finally:
         get_settings.cache_clear()
-        async with admin_engine.connect() as conn:
-            await conn.execute(
-                text(f'DROP DATABASE IF EXISTS "{disposable_db_name}" WITH (FORCE);')
-            )
-        await admin_engine.dispose()
+
+        if db_created:
+            try:
+                async with admin_engine.connect() as conn:
+                    await conn.execute(
+                        text(f'DROP DATABASE IF EXISTS "{disposable_db_name}" WITH (FORCE);')
+                    )
+            except Exception as drop_exc:
+                cleanup_failures.append(drop_exc)
+
+        try:
+            await admin_engine.dispose()
+        except Exception as dispose_exc:
+            cleanup_failures.append(dispose_exc)
+
+        if cleanup_failures:
+            import sys
+
+            active_exc = sys.exception()
+            if active_exc is None:
+                if len(cleanup_failures) == 1:
+                    raise cleanup_failures[0]
+                else:
+                    raise ExceptionGroup("Disposable DB cleanup failed", cleanup_failures)
+            else:
+                import logging
+
+                logger = logging.getLogger("tests.conftest")
+                for exc in cleanup_failures:
+                    logger.error(
+                        "Database cleanup error while handling test exception (%s): %s",
+                        active_exc,
+                        exc,
+                        exc_info=exc,
+                    )
 
 
 @pytest_asyncio.fixture
