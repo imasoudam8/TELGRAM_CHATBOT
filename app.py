@@ -10,6 +10,8 @@ Telegram-native architecture.
 import http.server
 import json
 import os
+import signal
+import sys
 from http import HTTPStatus
 
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -94,6 +96,12 @@ Operational Commands:
 """
 
 
+class ReusableThreadingHTTPServer(http.server.ThreadingHTTPServer):
+    """Threading HTTP server with explicit address reuse enabled."""
+
+    allow_reuse_address = True
+
+
 class HealthAndDiagnosticHandler(http.server.BaseHTTPRequestHandler):
     """HTTP request handler supporting GET, HEAD, and JSON health endpoints."""
 
@@ -128,18 +136,25 @@ class HealthAndDiagnosticHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+def _handle_sigterm(_signum: int, _frame: object) -> None:
+    """Exit cleanly on SIGTERM so the listening socket closes immediately."""
+    sys.exit(0)
+
+
 def main() -> None:
     """Run persistent HTTP diagnostic server on configured PORT."""
-    port = int(os.environ.get("PORT", "3000"))
-    host = os.environ.get("HOST", "0.0.0.0")
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+    port = int(os.environ.get("PORT") or "3000")
+    host = os.environ.get("HOST") or "0.0.0.0"
 
-    server = http.server.ThreadingHTTPServer((host, port), HealthAndDiagnosticHandler)
+    server = ReusableThreadingHTTPServer((host, port), HealthAndDiagnosticHandler)
     server.daemon_threads = True
-    print(f"Anonymous Telegram Matching Bot dev server listening on {host}:{port}")
+    print(f"Anonymous Telegram Matching Bot dev server listening on {host}:{port}", flush=True)
     try:
         server.serve_forever()
-    except KeyboardInterrupt:
-        print("Dev server shutting down gracefully.")
+    except (KeyboardInterrupt, SystemExit):
+        print("Dev server shutting down gracefully.", flush=True)
+    finally:
         server.server_close()
 
 

@@ -13,8 +13,7 @@ from src.app.infrastructure.database.session import DatabaseManager
 from src.app.modules.profiles.service import ProfileData, ProfileService
 from src.app.modules.users.models import UserProfile
 from src.app.modules.users.service import UserService
-
-PROJECT_ROOT = Config().cmd_opts if False else None  # Dummy reference for path resolution
+from tests.conftest import PROJECT_ROOT
 
 
 @pytest.mark.asyncio
@@ -38,8 +37,8 @@ async def test_live_postgres_profile_schema_migration_and_persistence(
     monkeypatch.setenv("POSTGRES_DB", disposable_db_name)
     get_settings.cache_clear()
 
-    alembic_cfg = Config(str(settings.project_root / "alembic.ini"))
-    alembic_cfg.set_main_option("script_location", str(settings.project_root / "migrations"))
+    alembic_cfg = Config(str(PROJECT_ROOT / "alembic.ini"))
+    alembic_cfg.set_main_option("script_location", str(PROJECT_ROOT / "migrations"))
     alembic_cfg.set_main_option("sqlalchemy.url", disposable_async_url)
 
     # 1. Upgrade to previous head revision e0d35e865fec
@@ -76,18 +75,18 @@ async def test_live_postgres_profile_schema_migration_and_persistence(
         assert profile1.completion_status == "COMPLETED"
 
         # 4. Verify unique profile ownership constraint (cannot insert duplicate profile for user1)
-        async with db_manager.session() as session:
-            duplicate_profile = UserProfile(
-                user_id=user1.id,
-                age_18_plus_declared=user1.age_18_plus_declared,
-                age_declared_date=user1.age_declared_date,
-                age=30,
-                display_name="همزاد شماره یک",
-                gender="MALE",
-                completion_status="COMPLETED",
-            )
-            session.add(duplicate_profile)
-            with pytest.raises(IntegrityError):
+        with pytest.raises(IntegrityError):
+            async with db_manager.session() as session:
+                duplicate_profile = UserProfile(
+                    user_id=user1.id,
+                    age_18_plus_declared=user1.age_18_plus_declared,
+                    age_declared_date=user1.age_declared_date,
+                    age=30,
+                    display_name="همزاد شماره یک",
+                    gender="MALE",
+                    completion_status="COMPLETED",
+                )
+                session.add(duplicate_profile)
                 await session.flush()
 
         # 5. Verify database-level age range check constraints (age < 18 or > 99 rejected)
