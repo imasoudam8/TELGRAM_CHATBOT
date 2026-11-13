@@ -89,6 +89,12 @@ from src.app.bot.keyboards.profile import (
     get_skip_keyboard,
     get_view_profile_keyboard,
 )
+from src.app.bot.keyboards.wallet import (
+    CB_WALLET_HISTORY_PREFIX,
+    CB_WALLET_REFRESH,
+    get_wallet_history_keyboard,
+    get_wallet_menu_keyboard,
+)
 
 __all__ = [
     "AGE_CONFIRM_TEXT",
@@ -148,6 +154,8 @@ __all__ = [
     "CB_SKIP_BIO",
     "CB_SKIP_CITY",
     "CB_START_CREATE",
+    "CB_WALLET_HISTORY_PREFIX",
+    "CB_WALLET_REFRESH",
     "GENDER_LABELS",
     "MAIN_MENU_BUTTONS",
     "get_active_chat_inline_keyboard",
@@ -172,4 +180,6 @@ __all__ = [
     "get_review_keyboard",
     "get_skip_keyboard",
     "get_view_profile_keyboard",
+    "get_wallet_history_keyboard",
+    "get_wallet_menu_keyboard",
 ]

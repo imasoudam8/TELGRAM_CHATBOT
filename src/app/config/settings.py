@@ -61,6 +61,11 @@ class Settings(BaseSettings):
         default="Asia/Tehran",
         description="Business timezone identifier (e.g., Asia/Tehran)",
     )
+    DAILY_FREE_COINS_QUOTA: int = Field(
+        default=4,
+        ge=0,
+        description="Daily free Chat Coins allocated per user per business date",
+    )
 
     # Telegram Bot
     BOT_TOKEN: Annotated[

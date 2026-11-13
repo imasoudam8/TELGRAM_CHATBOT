@@ -12,6 +12,7 @@ from src.app.bot.handlers.discovery import get_discovery_router
 from src.app.bot.handlers.matching import get_matching_router
 from src.app.bot.handlers.onboarding import get_onboarding_router
 from src.app.bot.handlers.profile import get_profile_router
+from src.app.bot.handlers.wallet import get_wallet_router
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ def get_base_router() -> Router:
     router.include_router(get_matching_router())
     router.include_router(get_direct_requests_router())
     router.include_router(get_connections_router())
+    router.include_router(get_wallet_router())
     return router
 
 

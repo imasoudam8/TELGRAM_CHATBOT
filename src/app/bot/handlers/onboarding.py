@@ -13,6 +13,7 @@ from src.app.bot.keyboards.onboarding import (
     BTN_MY_PROFILE,
     BTN_RANDOM_CHAT,
     BTN_VIEW_PROFILES,
+    BTN_WALLET,
     CALLBACK_AGE_CONFIRM,
     CALLBACK_AGE_DECLINE,
     MAIN_MENU_BUTTONS,
@@ -237,6 +238,7 @@ def get_onboarding_router() -> Router:
         BTN_DIRECT_REQUEST,
         BTN_MY_CONNECTIONS,
         BTN_MY_PROFILE,
+        BTN_WALLET,
     }
     other_menu_buttons = [btn for btn in MAIN_MENU_BUTTONS if btn not in dedicated_buttons]
     router.message.register(handle_main_menu_entry, F.text.in_(other_menu_buttons))

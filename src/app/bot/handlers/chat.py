@@ -33,6 +33,7 @@ from src.app.modules.chat.session_service import (
     RelayMessageResult,
 )
 from src.app.modules.notifications.service import NotificationService
+from src.app.modules.wallet.settlement import ChatSettlementService
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +136,7 @@ async def handle_end_chat_message(
             await reply_with_auth_error(message, err or MSG_GENERIC_ERROR)
             return
 
-        result = await ChatService(resolved_db).end_chat(
+        result = await ChatService(resolved_db, resolved_settings).end_chat(
             user.id,
             expected_chat_id=active_chat.chat_id if active_chat else None,
             reason="USER_LEFT",
@@ -190,7 +191,7 @@ async def handle_end_chat_callback(
             await callback.answer()
             return
 
-        result = await ChatService(resolved_db).end_chat(
+        result = await ChatService(resolved_db, resolved_settings).end_chat(
             user.id, expected_chat_id=expected_chat_id, reason="USER_LEFT"
         )
         try:
@@ -246,9 +247,9 @@ async def handle_block_partner_message(
             await message.answer("گفتگوی فعالی یافت نشد.", reply_markup=get_main_menu_keyboard())
             return
 
-        blk_result = await ConnectionAndBlockService(resolved_db).block_active_chat_partner(
-            user.id, resolved_chat.chat_id
-        )
+        blk_result = await ConnectionAndBlockService(
+            resolved_db, resolved_settings
+        ).block_active_chat_partner(user.id, resolved_chat.chat_id)
         await message.answer(
             "🚫 مخاطب مسدود شد و گفتگو بلافاصله پایان یافت.",
             reply_markup=get_main_menu_keyboard(),
@@ -293,9 +294,9 @@ async def handle_block_partner_callback(
             await callback.answer()
             return
 
-        blk_result = await ConnectionAndBlockService(resolved_db).block_active_chat_partner(
-            user.id, chat_id
-        )
+        blk_result = await ConnectionAndBlockService(
+            resolved_db, resolved_settings
+        ).block_active_chat_partner(user.id, chat_id)
         try:
             await callback.message.edit_reply_markup(reply_markup=None)
         except Exception:
@@ -367,7 +368,8 @@ async def handle_chat_relay_message(
             await reply_with_auth_error(message, err or MSG_GENERIC_ERROR)
             return
 
-        relay_result = await ChatService(resolved_db).prepare_and_record_message(
+        chat_svc = ChatService(resolved_db, resolved_settings)
+        relay_result = await chat_svc.prepare_and_record_message(
             sender_user_id=user.id,
             message_type=msg_type,
             text_content=text_val,
@@ -379,9 +381,24 @@ async def handle_chat_relay_message(
 
         delivered = await _deliver_relayed_message(message.bot, relay_result)
         if not delivered:
+            if relay_result.sender_first_message_flag_set:
+                await chat_svc.revert_first_message_flag(relay_result.chat_id, user.id)
             await message.answer(
                 "⚠️ ارسال پیام به مخاطب انجام نشد. در صورت تکرار، می‌توانید گفتگو را پایان دهید."
             )
+            return
+
+        if relay_result.both_participants_sent:
+            try:
+                await ChatSettlementService(resolved_db, resolved_settings).settle_chat(
+                    relay_result.chat_id
+                )
+            except Exception as settle_exc:
+                logger.error(
+                    "Chat settlement deferred due to error (%s) for chat=%s",
+                    type(settle_exc).__name__,
+                    relay_result.chat_id,
+                )
     except PermissionError as safety_err:
         await message.answer(f"🚫 {html.escape(str(safety_err))}")
     except ValueError as val_err:

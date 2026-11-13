@@ -9,6 +9,7 @@ from sqlalchemy import and_, delete, exists, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.app.config.settings import Settings, get_settings
 from src.app.infrastructure.database.base import now_utc
 from src.app.infrastructure.database.session import DatabaseManager
 from src.app.modules.chat.models import (
@@ -19,6 +20,7 @@ from src.app.modules.chat.models import (
     UserConnection,
 )
 from src.app.modules.users.models import User, UserProfile
+from src.app.modules.wallet.settlement import ChatSettlementService
 
 logger = logging.getLogger(__name__)
 
@@ -125,8 +127,9 @@ async def has_bidirectional_block(
 class ConnectionAndBlockService:
     """Manages persistent user connections and bidirectional user blocks."""
 
-    def __init__(self, db_manager: DatabaseManager) -> None:
+    def __init__(self, db_manager: DatabaseManager, settings: Settings | None = None) -> None:
         self._db_manager = db_manager
+        self._settings = settings or get_settings()
 
     async def is_blocked(self, user_a_id: int, user_b_id: int) -> bool:
         """Check whether a block exists in either direction between two users."""
@@ -305,6 +308,14 @@ class ConnectionAndBlockService:
                         ActiveChatParticipant.chat_id == active_chat.id
                     )
                 )
+                if (
+                    active_chat.participant_one_sent_msg
+                    and active_chat.participant_two_sent_msg
+                    and not active_chat.is_charged
+                ):
+                    await ChatSettlementService(
+                        self._db_manager, self._settings
+                    ).settle_chat_in_session(session, active_chat, utc_now=utc_now)
 
             blocker.last_activity_at = utc_now
             await session.flush()

@@ -9,6 +9,7 @@ from datetime import timedelta
 from sqlalchemy import delete, select
 from sqlalchemy.orm import selectinload
 
+from src.app.config.settings import Settings, get_settings
 from src.app.infrastructure.database.base import now_utc
 from src.app.infrastructure.database.session import DatabaseManager
 from src.app.modules.chat.connections import has_bidirectional_block
@@ -16,6 +17,7 @@ from src.app.modules.chat.content_filter import validate_message_text
 from src.app.modules.chat.models import ActiveChatParticipant, ChatMessage, ChatSession
 from src.app.modules.discovery.schemas import PublicProfileDTO
 from src.app.modules.users.models import User
+from src.app.modules.wallet.settlement import ChatSettlementService
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,8 @@ class RelayMessageResult:
     text: str | None = None
     telegram_file_id: str | None = None
     caption: str | None = None
+    sender_first_message_flag_set: bool = False
+    both_participants_sent: bool = False
 
 
 @dataclass(frozen=True)
@@ -84,8 +88,9 @@ def _user_to_public_dto(user: User) -> PublicProfileDTO:
 class ChatService:
     """Manages active anonymous chats, message metadata persistence, and session ending."""
 
-    def __init__(self, db_manager: DatabaseManager) -> None:
+    def __init__(self, db_manager: DatabaseManager, settings: Settings | None = None) -> None:
         self._db_manager = db_manager
+        self._settings = settings or get_settings()
 
     async def get_active_chat_by_user_id(self, user_id: int) -> ActiveChatInfo | None:
         """Return active chat metadata for user_id if currently in an active chat."""
@@ -250,6 +255,14 @@ class ChatService:
                 await session.execute(
                     delete(ActiveChatParticipant).where(ActiveChatParticipant.chat_id == chat.id)
                 )
+                if (
+                    chat.participant_one_sent_msg
+                    and chat.participant_two_sent_msg
+                    and not chat.is_charged
+                ):
+                    await ChatSettlementService(
+                        self._db_manager, self._settings
+                    ).settle_chat_in_session(session, chat, utc_now=utc_now)
                 await session.flush()
                 raise RuntimeError("حساب کاربری طرف مقابل غیرفعال است و گفتگو پایان یافت.")
 
@@ -260,6 +273,14 @@ class ChatService:
                 await session.execute(
                     delete(ActiveChatParticipant).where(ActiveChatParticipant.chat_id == chat.id)
                 )
+                if (
+                    chat.participant_one_sent_msg
+                    and chat.participant_two_sent_msg
+                    and not chat.is_charged
+                ):
+                    await ChatSettlementService(
+                        self._db_manager, self._settings
+                    ).settle_chat_in_session(session, chat, utc_now=utc_now)
                 await session.flush()
                 raise PermissionError("به دلیل مسدودسازی، این گفتگو پایان یافته است.")
 
@@ -277,12 +298,17 @@ class ChatService:
             )
             session.add(msg_record)
 
+            sender_first_flag_set = False
             if sender_is_p1 and not chat.participant_one_sent_msg:
                 chat.participant_one_sent_msg = True
+                sender_first_flag_set = True
             elif not sender_is_p1 and not chat.participant_two_sent_msg:
                 chat.participant_two_sent_msg = True
+                sender_first_flag_set = True
 
-            # TASK007 wallet boundary: explicitly keep is_charged unchanged (False)
+            both_sent = bool(chat.participant_one_sent_msg and chat.participant_two_sent_msg)
+
+            # Settlement executes after Telegram delivery succeeds (or on chat end)
             sender_user.last_activity_at = utc_now
 
             await session.flush()
@@ -296,7 +322,25 @@ class ChatService:
                 text=text_content,
                 telegram_file_id=telegram_file_id,
                 caption=caption,
+                sender_first_message_flag_set=sender_first_flag_set,
+                both_participants_sent=both_sent,
             )
+
+    async def revert_first_message_flag(self, chat_id: uuid.UUID, sender_user_id: int) -> None:
+        """Revert sender's first-message flag if Telegram delivery of that message failed."""
+        async with self._db_manager.session() as session:
+            chat = (
+                await session.execute(
+                    select(ChatSession).where(ChatSession.id == chat_id).with_for_update()
+                )
+            ).scalar_one_or_none()
+            if chat is None or chat.is_charged:
+                return
+            if sender_user_id == chat.participant_one_id:
+                chat.participant_one_sent_msg = False
+            elif sender_user_id == chat.participant_two_id:
+                chat.participant_two_sent_msg = False
+            await session.flush()
 
     async def end_chat(
         self,
@@ -363,6 +407,15 @@ class ChatService:
             partner_user = users_map.get(partner_id)
             if actor_user is not None:
                 actor_user.last_activity_at = utc_now
+
+            if (
+                chat.participant_one_sent_msg
+                and chat.participant_two_sent_msg
+                and not chat.is_charged
+            ):
+                await ChatSettlementService(
+                    self._db_manager, self._settings
+                ).settle_chat_in_session(session, chat, utc_now=utc_now)
 
             await session.flush()
 

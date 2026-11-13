@@ -14,6 +14,7 @@ from src.app.bot.handlers.onboarding import (
     handle_start,
 )
 from src.app.bot.handlers.profile import get_profile_router, handle_profile_menu_entry
+from src.app.bot.handlers.wallet import get_wallet_router
 
 __all__ = [
     "base_router",
@@ -25,6 +26,7 @@ __all__ = [
     "get_matching_router",
     "get_onboarding_router",
     "get_profile_router",
+    "get_wallet_router",
     "handle_age_confirm_callback",
     "handle_age_decline_callback",
     "handle_main_menu_entry",

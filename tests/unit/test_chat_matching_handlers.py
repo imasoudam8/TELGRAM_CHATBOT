@@ -137,6 +137,7 @@ def test_base_router_mounts_all_task007_routers() -> None:
         "matching",
         "direct_requests",
         "connections",
+        "wallet",
     }.issubset(sub_names)
 
 
@@ -208,6 +209,14 @@ async def test_chat_relay_validation_html_escaping_video_limit_and_delivery_fail
     assert sent_kwargs["chat_id"] == 600002
     assert sent_kwargs["text"] == "سلام &lt;خوبی&gt; &amp; &lt;b&gt;تست&lt;/b&gt;"
 
+    async with db.session() as session:
+        chat_mid = (
+            await session.execute(select(ChatSession).where(ChatSession.id == chat_id))
+        ).scalar_one()
+        assert chat_mid.participant_one_sent_msg is True
+        assert chat_mid.participant_two_sent_msg is False
+        assert chat_mid.is_charged is False
+
     # 2. Content filter rejects @username without relaying
     bot.send_message.reset_mock()
     msg_unsafe = _make_message(600001, text="آیدیم @ali_1234 هست", bot=bot)
@@ -226,7 +235,7 @@ async def test_chat_relay_validation_html_escaping_video_limit_and_delivery_fail
     await handle_chat_relay_message(msg_doc, db_manager=db, settings=test_settings)
     assert "پشتیبانی نمی‌شود" in msg_doc.answer.call_args[0][0]
 
-    # 5. Photo relay uses telegram file_id and succeeds
+    # 5. Photo relay uses telegram file_id, succeeds, and triggers chat settlement
     msg_photo = _make_message(600002, photo_id="photo_file_999", bot=bot)
     await handle_chat_relay_message(msg_photo, db_manager=db, settings=test_settings)
     bot.send_photo.assert_awaited_once_with(chat_id=600001, photo="photo_file_999", caption=None)
@@ -238,14 +247,14 @@ async def test_chat_relay_validation_html_escaping_video_limit_and_delivery_fail
     await handle_chat_relay_message(msg_fail, db_manager=db, settings=test_settings)
     assert "انجام نشد" in msg_fail.answer.call_args[0][0]
 
-    # Verify chat session remains ACTIVE, is_charged remains False, both sent_msg flags True
+    # Verify chat session remains ACTIVE, settled exactly once, both sent_msg flags True
     async with db.session() as session:
         chat_row = (
             await session.execute(select(ChatSession).where(ChatSession.id == chat_id))
         ).scalar_one()
         assert chat_row.status == "ACTIVE"
-        assert chat_row.is_charged is False
-        assert chat_row.charged_at is None
+        assert chat_row.is_charged is True
+        assert chat_row.charged_at is not None
         assert chat_row.participant_one_sent_msg is True
         assert chat_row.participant_two_sent_msg is True
 
