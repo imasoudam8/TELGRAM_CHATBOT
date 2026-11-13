@@ -36,3 +36,31 @@ class DirectRequestSG(StatesGroup):
     """Conversation states for sending a direct request by public ID."""
 
     waiting_for_target_public_id = State()
+
+
+class ReportSG(StatesGroup):
+    """Conversation states for submitting an abuse/safety report."""
+
+    selecting_category = State()
+    entering_description = State()
+
+
+class AdminSG(StatesGroup):
+    """Conversation states for authenticated Telegram admin operations."""
+
+    waiting_for_user_public_id = State()
+    waiting_for_report_notes = State()
+    waiting_for_moderation_duration = State()
+    waiting_for_moderation_reason = State()
+    waiting_for_pair_block_input = State()
+    waiting_for_pair_unblock_input = State()
+    waiting_for_wallet_public_id = State()
+    waiting_for_wallet_amount = State()
+    waiting_for_wallet_reason = State()
+    confirming_wallet_op = State()
+    waiting_for_config_value = State()
+    waiting_for_config_reason = State()
+    confirming_config_update = State()
+    waiting_for_role_public_id = State()
+    waiting_for_role_reason = State()
+    confirming_role_change = State()

@@ -17,6 +17,7 @@ from src.app.modules.discovery.schemas import (
     PublicProfileDTO,
     UserPreferencesDTO,
 )
+from src.app.modules.moderation.enforcement import reconcile_user_suspension_in_session
 from src.app.modules.profiles.service import VALID_GENDERS
 from src.app.modules.users.models import User, UserPreferences, UserProfile
 
@@ -226,11 +227,10 @@ class DiscoveryService:
         relaxable_dict = {key: (key in clean_relaxable) for key in sorted(RELAXABLE_FIELD_KEYS)}
 
         async with self._db_manager.session() as session:
-            user_res = await session.execute(
-                select(User).where(User.id == user_id, User.status == "ACTIVE")
-            )
+            user_res = await session.execute(select(User).where(User.id == user_id))
             user = user_res.scalar_one_or_none()
-            if user is None or not user.age_18_plus_declared:
+            await reconcile_user_suspension_in_session(session, user, utc_now=utc_now)
+            if user is None or user.status != "ACTIVE" or not user.age_18_plus_declared:
                 raise PermissionError("کاربر فعال یا واجد شرایط یافت نشد.")
 
             user.last_activity_at = utc_now
@@ -287,11 +287,10 @@ class DiscoveryService:
         utc_now = now_utc()
 
         async with self._db_manager.session() as session:
-            viewer_res = await session.execute(
-                select(User).where(User.id == viewer_user_id, User.status == "ACTIVE")
-            )
+            viewer_res = await session.execute(select(User).where(User.id == viewer_user_id))
             viewer = viewer_res.scalar_one_or_none()
-            if viewer is None or not viewer.age_18_plus_declared:
+            await reconcile_user_suspension_in_session(session, viewer, utc_now=utc_now)
+            if viewer is None or viewer.status != "ACTIVE" or not viewer.age_18_plus_declared:
                 raise PermissionError("دسترسی مجاز نیست.")
 
             viewer.last_activity_at = utc_now
@@ -402,11 +401,17 @@ class DiscoveryService:
         res = await session.execute(
             select(User).where(
                 User.telegram_user_id == telegram_user_id,
-                User.status == "ACTIVE",
+                User.status != "DELETED",
                 User.age_18_plus_declared.is_(True),
             )
         )
-        return res.scalar_one_or_none()
+        user = res.scalar_one_or_none()
+        if user is None:
+            return None
+        await reconcile_user_suspension_in_session(session, user)
+        if user.status != "ACTIVE":
+            return None
+        return user
 
     @staticmethod
     async def _load_or_default_preferences(

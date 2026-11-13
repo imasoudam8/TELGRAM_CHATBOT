@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.app.infrastructure.database.base import get_business_date, now_utc
 from src.app.infrastructure.database.session import DatabaseManager
+from src.app.modules.moderation.enforcement import reconcile_user_suspension_in_session
 from src.app.modules.users.models import User
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,10 @@ class UserService:
             .where(User.status != "DELETED")
         )
         result = await session.execute(stmt)
-        return result.scalar_one_or_none()
+        user = result.scalar_one_or_none()
+        if user is not None:
+            await reconcile_user_suspension_in_session(session, user)
+        return user
 
     async def register_adult_user(
         self,

@@ -21,6 +21,10 @@ from src.app.modules.discovery.service import (
     preferences_model_to_dto,
     profile_matches_preferences,
 )
+from src.app.modules.moderation.enforcement import (
+    has_active_chat_restriction_in_session,
+    reconcile_user_suspension_in_session,
+)
 from src.app.modules.users.models import User, UserPreferences
 
 logger = logging.getLogger(__name__)
@@ -136,6 +140,8 @@ class RandomMatchService:
                 )
             ).scalar_one_or_none()
 
+            await reconcile_user_suspension_in_session(session, seeker, utc_now=utc_now)
+
             if (
                 seeker is None
                 or seeker.status != "ACTIVE"
@@ -143,9 +149,14 @@ class RandomMatchService:
                 or seeker.profile is None
                 or seeker.profile.completion_status != "COMPLETED"
             ):
+                await self._queue_remove(user_id)
                 raise PermissionError(
                     "برای استفاده از گفتگوی تصادفی باید حساب فعال و پروفایل تکمیل‌شده داشته باشید."
                 )
+
+            if await has_active_chat_restriction_in_session(session, seeker.id, utc_now=utc_now):
+                await self._queue_remove(user_id)
+                raise PermissionError("دسترسی گفتگوی شما توسط تیم نظارت محدود شده است.")
 
             in_chat = (
                 await session.execute(
@@ -264,12 +275,17 @@ class RandomMatchService:
 
             for cand_user, in_active_chat, is_blocked in rows:
                 found_ids.add(cand_user.id)
+                await reconcile_user_suspension_in_session(session, cand_user, utc_now=utc_now)
+                cand_restricted = await has_active_chat_restriction_in_session(
+                    session, cand_user.id, utc_now=utc_now
+                )
                 if (
                     cand_user.status != "ACTIVE"
                     or not cand_user.age_18_plus_declared
                     or cand_user.profile is None
                     or cand_user.profile.completion_status != "COMPLETED"
                     or in_active_chat
+                    or cand_restricted
                 ):
                     stale_to_evict.append(cand_user.id)
                     continue
@@ -346,6 +362,8 @@ class RandomMatchService:
                 users_map = {u.id: u for u in users_res.scalars().all()}
                 seeker = users_map.get(seeker_id)
                 partner = users_map.get(partner_id)
+                await reconcile_user_suspension_in_session(session, seeker, utc_now=utc_now)
+                await reconcile_user_suspension_in_session(session, partner, utc_now=utc_now)
 
                 if (
                     seeker is None
@@ -359,6 +377,18 @@ class RandomMatchService:
                     or seeker.profile.completion_status != "COMPLETED"
                     or partner.profile.completion_status != "COMPLETED"
                 ):
+                    return None
+
+                if await has_active_chat_restriction_in_session(
+                    session, seeker.id, utc_now=utc_now
+                ):
+                    await self._queue_remove(seeker.id)
+                    raise PermissionError("دسترسی گفتگوی شما توسط تیم نظارت محدود شده است.")
+
+                if await has_active_chat_restriction_in_session(
+                    session, partner.id, utc_now=utc_now
+                ):
+                    await self._queue_remove(partner.id)
                     return None
 
                 if await has_bidirectional_block(session, seeker.id, partner.id):

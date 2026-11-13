@@ -22,6 +22,12 @@ from src.app.bot.keyboards.onboarding import (
 )
 from src.app.config.settings import Settings, get_settings
 from src.app.infrastructure.database.session import DatabaseManager, get_database_manager
+from src.app.modules.moderation.enforcement import (
+    AccountRestrictionStatus,
+    as_utc,
+    format_account_restriction_message,
+)
+from src.app.modules.users.models import User
 from src.app.modules.users.service import UserService
 
 logger = logging.getLogger(__name__)
@@ -77,6 +83,19 @@ DATABASE_ERROR_TEXT = (
 )
 
 
+def _format_user_restriction(user: User, settings: Settings) -> str:
+    return format_account_restriction_message(
+        AccountRestrictionStatus(
+            user_id=user.id,
+            account_status=user.status,
+            is_chat_restricted=True,
+            restriction_reason=user.suspension_reason,
+            expires_at=as_utc(user.suspended_until) if user.suspended_until else None,
+        ),
+        settings=settings,
+    )
+
+
 async def handle_start(
     message: Message,
     db_manager: DatabaseManager | None = None,
@@ -98,6 +117,9 @@ async def handle_start(
     try:
         user = await user_service.get_user_by_telegram_id(telegram_user_id)
         if user is not None and user.age_18_plus_declared:
+            if user.status != "ACTIVE":
+                await message.answer(_format_user_restriction(user, settings))
+                return
             logger.info("Existing registered user %s accessed /start", telegram_user_id)
             await message.answer(
                 ALREADY_REGISTERED_TEXT.format(public_id=user.public_id),
@@ -150,6 +172,10 @@ async def handle_age_confirm_callback(
                 await callback.message.edit_reply_markup(reply_markup=None)
             except Exception:
                 pass
+
+            if user.status != "ACTIVE":
+                await callback.message.answer(_format_user_restriction(user, settings))
+                return
 
             await callback.message.answer(
                 REGISTRATION_SUCCESS_TEXT.format(public_id=user.public_id),
@@ -209,6 +235,10 @@ async def handle_main_menu_entry(
                 UNREGISTERED_ACCESS_DENIED_TEXT,
                 reply_markup=get_age_declaration_keyboard(),
             )
+            return
+
+        if user.status != "ACTIVE":
+            await message.answer(_format_user_restriction(user, settings))
             return
 
         button_text = message.text or ""

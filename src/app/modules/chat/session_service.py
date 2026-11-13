@@ -12,10 +12,18 @@ from sqlalchemy.orm import selectinload
 from src.app.config.settings import Settings, get_settings
 from src.app.infrastructure.database.base import now_utc
 from src.app.infrastructure.database.session import DatabaseManager
+from src.app.modules.admin.config_service import (
+    get_effective_message_retention_days_in_session,
+    get_effective_video_size_limit_in_session,
+)
 from src.app.modules.chat.connections import has_bidirectional_block
 from src.app.modules.chat.content_filter import validate_message_text
 from src.app.modules.chat.models import ActiveChatParticipant, ChatMessage, ChatSession
 from src.app.modules.discovery.schemas import PublicProfileDTO
+from src.app.modules.moderation.enforcement import (
+    has_active_chat_restriction_in_session,
+    reconcile_user_suspension_in_session,
+)
 from src.app.modules.users.models import User
 from src.app.modules.wallet.settlement import ChatSettlementService
 
@@ -140,19 +148,28 @@ class ChatService:
                 partner_profile=_user_to_public_dto(partner_user),
             )
 
+    async def get_effective_video_size_limit(self) -> int:
+        """Return effective video size limit in bytes honoring DB config and hard 10 MiB cap."""
+        async with self._db_manager.session() as session:
+            return await get_effective_video_size_limit_in_session(session)
+
     async def get_active_chat_by_telegram_id(self, telegram_user_id: int) -> ActiveChatInfo | None:
         """Return active chat metadata for telegram_user_id if currently in an active chat."""
         async with self._db_manager.session() as session:
-            uid = (
+            user = (
                 await session.execute(
-                    select(User.id).where(
+                    select(User).where(
                         User.telegram_user_id == telegram_user_id,
-                        User.status == "ACTIVE",
+                        User.status != "DELETED",
                     )
                 )
             ).scalar_one_or_none()
-            if uid is None:
+            if user is None:
                 return None
+            await reconcile_user_suspension_in_session(session, user)
+            if user.status != "ACTIVE":
+                return None
+            uid = user.id
 
         return await self.get_active_chat_by_user_id(uid)
 
@@ -206,9 +223,24 @@ class ChatService:
 
         content_hash = hashlib.sha256(hash_source.encode("utf-8")).hexdigest()
         utc_now = now_utc()
-        expires_at = utc_now + timedelta(days=MESSAGE_RETENTION_DAYS)
 
         async with self._db_manager.session() as session:
+            if norm_type == "VIDEO":
+                effective_video_limit = await get_effective_video_size_limit_in_session(session)
+                if file_size_bytes is None or file_size_bytes >= effective_video_limit:
+                    if effective_video_limit == VIDEO_SIZE_LIMIT_BYTES:
+                        raise ValueError(
+                            "حجم ویدیو باید کمتر از ۱۰ مگابایت باشد. "
+                            "ویدیوهای ۱۰ مگابایت یا بیشتر مجاز نیستند."
+                        )
+                    mb_limit = effective_video_limit / (1024 * 1024)
+                    raise ValueError(
+                        f"حجم ویدیو از سقف مجاز فعلی ({mb_limit:.1f} مگابایت / "
+                        f"{effective_video_limit} بایت) بیشتر است."
+                    )
+
+            retention_days = await get_effective_message_retention_days_in_session(session)
+            expires_at = utc_now + timedelta(days=retention_days)
             part = (
                 await session.execute(
                     select(ActiveChatParticipant).where(
@@ -243,14 +275,36 @@ class ChatService:
             sender_user = users_map.get(sender_user_id)
             recipient_user = users_map.get(recipient_id)
 
+            if sender_user is not None:
+                await reconcile_user_suspension_in_session(session, sender_user, utc_now=utc_now)
+            if recipient_user is not None:
+                await reconcile_user_suspension_in_session(session, recipient_user, utc_now=utc_now)
+
+            sender_restricted = (
+                sender_user is not None
+                and await has_active_chat_restriction_in_session(
+                    session, sender_user.id, utc_now=utc_now
+                )
+            )
+            recipient_restricted = (
+                recipient_user is not None
+                and await has_active_chat_restriction_in_session(
+                    session, recipient_user.id, utc_now=utc_now
+                )
+            )
+
             if (
                 sender_user is None
                 or recipient_user is None
                 or sender_user.status != "ACTIVE"
                 or recipient_user.status != "ACTIVE"
+                or sender_restricted
+                or recipient_restricted
             ):
                 chat.status = "ENDED"
-                chat.end_reason = "PARTNER_LEFT"
+                chat.end_reason = (
+                    "REPORTED" if (sender_restricted or recipient_restricted) else "PARTNER_LEFT"
+                )
                 chat.ended_at = utc_now
                 await session.execute(
                     delete(ActiveChatParticipant).where(ActiveChatParticipant.chat_id == chat.id)
@@ -264,6 +318,8 @@ class ChatService:
                         self._db_manager, self._settings
                     ).settle_chat_in_session(session, chat, utc_now=utc_now)
                 await session.flush()
+                if sender_user is None or sender_user.status != "ACTIVE" or sender_restricted:
+                    raise PermissionError("دسترسی گفتگوی شما محدود شده است.")
                 raise RuntimeError("حساب کاربری طرف مقابل غیرفعال است و گفتگو پایان یافت.")
 
             if await has_bidirectional_block(session, sender_user_id, recipient_id):

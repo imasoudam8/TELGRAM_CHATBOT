@@ -19,6 +19,7 @@ from src.app.modules.chat.models import (
     UserBlock,
     UserConnection,
 )
+from src.app.modules.moderation.enforcement import reconcile_user_suspension_in_session
 from src.app.modules.users.models import User, UserProfile
 from src.app.modules.wallet.settlement import ChatSettlementService
 
@@ -223,11 +224,10 @@ class ConnectionAndBlockService:
         utc_now = now_utc()
 
         async with self._db_manager.session() as session:
-            blocker_res = await session.execute(
-                select(User).where(User.id == blocker_user_id, User.status == "ACTIVE")
-            )
+            blocker_res = await session.execute(select(User).where(User.id == blocker_user_id))
             blocker = blocker_res.scalar_one_or_none()
-            if blocker is None:
+            await reconcile_user_suspension_in_session(session, blocker, utc_now=utc_now)
+            if blocker is None or blocker.status != "ACTIVE":
                 raise PermissionError("کاربر یافت نشد یا غیرفعال است.")
 
             target_res = await session.execute(

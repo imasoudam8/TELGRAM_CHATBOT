@@ -193,7 +193,11 @@ async def handle_dr_send_by_id_input(
 
     try:
         user, err = await load_authorized_user(
-            resolved_db, message.from_user.id, require_completed_profile=True
+            resolved_db,
+            message.from_user.id,
+            require_completed_profile=True,
+            allow_chat_restricted=False,
+            settings=resolved_settings,
         )
         if err is not None or user is None:
             await state.clear()
@@ -263,7 +267,11 @@ async def handle_dr_decision_callback(
 
     try:
         user, err = await load_authorized_user(
-            resolved_db, callback.from_user.id, require_completed_profile=True
+            resolved_db,
+            callback.from_user.id,
+            require_completed_profile=True,
+            allow_chat_restricted=not accept,
+            settings=resolved_settings,
         )
         if err is not None or user is None:
             await callback.answer()

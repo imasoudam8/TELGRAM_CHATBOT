@@ -11,6 +11,9 @@ from sqlalchemy.orm import selectinload
 
 from src.app.infrastructure.database.base import now_utc
 from src.app.infrastructure.database.session import DatabaseManager
+from src.app.modules.admin.config_service import (
+    get_effective_direct_request_expiry_hours_in_session,
+)
 from src.app.modules.chat.connections import ensure_bilateral_connections, has_bidirectional_block
 from src.app.modules.chat.models import (
     ActiveChatParticipant,
@@ -19,6 +22,10 @@ from src.app.modules.chat.models import (
     UserBlock,
 )
 from src.app.modules.discovery.schemas import PublicProfileDTO
+from src.app.modules.moderation.enforcement import (
+    has_active_chat_restriction_in_session,
+    reconcile_user_suspension_in_session,
+)
 from src.app.modules.users.models import User
 
 logger = logging.getLogger(__name__)
@@ -104,30 +111,47 @@ class DirectRequestService:
             raise ValueError("شناسه عمومی کاربر وارد نشده است.")
 
         utc_now = now_utc()
-        expires_at = utc_now + timedelta(hours=DIRECT_REQUEST_EXPIRY_HOURS)
 
         async with self._db_manager.session() as session:
             req_res = await session.execute(
                 select(User).options(selectinload(User.profile)).where(User.id == requester_user_id)
             )
             requester = req_res.scalar_one_or_none()
+            await reconcile_user_suspension_in_session(session, requester, utc_now=utc_now)
             if not _is_user_chat_eligible(requester):
                 raise PermissionError(
                     "برای ارسال درخواست مستقیم باید حساب فعال و پروفایل تکمیل‌شده داشته باشید."
                 )
             assert requester is not None
+            if await has_active_chat_restriction_in_session(session, requester.id, utc_now=utc_now):
+                raise PermissionError(
+                    "دسترسی گفتگوی شما محدود شده است و امکان ارسال درخواست جدید را ندارید."
+                )
 
             tgt_res = await session.execute(
                 select(User).options(selectinload(User.profile)).where(User.public_id == clean_pid)
             )
             target = tgt_res.scalar_one_or_none()
-            if not _is_user_chat_eligible(target) or (
-                target is not None
-                and target.profile is not None
-                and target.profile.visibility != "PUBLIC"
+            await reconcile_user_suspension_in_session(session, target, utc_now=utc_now)
+            if (
+                not _is_user_chat_eligible(target)
+                or (
+                    target is not None
+                    and target.profile is not None
+                    and target.profile.visibility != "PUBLIC"
+                )
+                or (
+                    target is not None
+                    and await has_active_chat_restriction_in_session(
+                        session, target.id, utc_now=utc_now
+                    )
+                )
             ):
                 raise LookupError("کاربر مورد نظر یافت نشد یا پروفایل او در دسترس نیست.")
             assert target is not None
+
+            expiry_hours = await get_effective_direct_request_expiry_hours_in_session(session)
+            expires_at = utc_now + timedelta(hours=expiry_hours)
 
             if requester.id == target.id:
                 raise ValueError("امکان ارسال درخواست گفتگو به خودتان وجود ندارد.")
@@ -249,12 +273,35 @@ class DirectRequestService:
                 users_map = {u.id: u for u in users_res.scalars().all()}
                 requester = users_map.get(direct_req.requester_id)
                 target = users_map.get(direct_req.target_id)
+                await reconcile_user_suspension_in_session(session, requester, utc_now=utc_now)
+                await reconcile_user_suspension_in_session(session, target, utc_now=utc_now)
+
+                req_restricted = (
+                    requester is not None
+                    and await has_active_chat_restriction_in_session(
+                        session, requester.id, utc_now=utc_now
+                    )
+                )
+                tgt_restricted = (
+                    target is not None
+                    and await has_active_chat_restriction_in_session(
+                        session, target.id, utc_now=utc_now
+                    )
+                )
 
                 if not _is_user_chat_eligible(requester) or not _is_user_chat_eligible(target):
                     direct_req.status = "CANCELLED"
                     direct_req.responded_at = utc_now
                     await session.flush()
                     error_to_raise = PermissionError("یکی از کاربران دیگر واجد شرایط گفتگو نیست.")
+                elif accept and (req_restricted or tgt_restricted):
+                    if req_restricted:
+                        direct_req.status = "CANCELLED"
+                        direct_req.responded_at = utc_now
+                        await session.flush()
+                    error_to_raise = PermissionError(
+                        "دسترسی گفتگوی شما یا کاربر مقابل موقتاً محدود شده است."
+                    )
                 elif await has_bidirectional_block(
                     session, direct_req.requester_id, direct_req.target_id
                 ):

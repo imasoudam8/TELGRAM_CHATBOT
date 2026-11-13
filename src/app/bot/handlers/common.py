@@ -18,9 +18,14 @@ from src.app.bot.keyboards.onboarding import (
     get_main_menu_keyboard,
 )
 from src.app.bot.keyboards.profile import GENDER_LABELS
+from src.app.config.settings import Settings
 from src.app.infrastructure.database.session import DatabaseManager
 from src.app.infrastructure.redis.client import RedisManager
 from src.app.modules.discovery.schemas import PublicProfileDTO, UserPreferencesDTO
+from src.app.modules.moderation.enforcement import (
+    evaluate_user_restrictions_in_session,
+    format_account_restriction_message,
+)
 from src.app.modules.notifications.service import NotificationService, format_public_profile_card
 from src.app.modules.users.models import User
 
@@ -54,8 +59,10 @@ async def load_authorized_user(
     telegram_user_id: int,
     *,
     require_completed_profile: bool = False,
+    allow_chat_restricted: bool = True,
+    settings: Settings | None = None,
 ) -> tuple[User | None, str | None]:
-    """Load user with profile and verify adult declaration, ACTIVE status, and optional profile.
+    """Load user with profile and verify adult declaration, ACTIVE status, and restrictions.
 
     Returns (user, localized_error_message).
     """
@@ -67,11 +74,15 @@ async def load_authorized_user(
             .where(User.status != "DELETED")
         )
         user = res.scalar_one_or_none()
+        if user is None or not user.age_18_plus_declared:
+            return None, MSG_UNREGISTERED
 
-    if user is None or not user.age_18_plus_declared:
-        return None, MSG_UNREGISTERED
-    if user.status != "ACTIVE":
-        return None, MSG_ACCOUNT_RESTRICTED
+        restriction = await evaluate_user_restrictions_in_session(session, user)
+
+    if restriction.account_status != "ACTIVE":
+        return None, format_account_restriction_message(restriction, settings=settings)
+    if not allow_chat_restricted and restriction.is_chat_restricted:
+        return None, format_account_restriction_message(restriction, settings=settings)
     if require_completed_profile and (
         user.profile is None or user.profile.completion_status != "COMPLETED"
     ):

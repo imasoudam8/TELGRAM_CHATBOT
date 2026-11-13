@@ -9,6 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from src.app.infrastructure.database.base import now_utc
 from src.app.infrastructure.database.session import DatabaseManager
+from src.app.modules.moderation.enforcement import reconcile_user_suspension_in_session
 from src.app.modules.users.models import User, UserProfile
 
 logger = logging.getLogger(__name__)
@@ -160,6 +161,9 @@ class ProfileService:
 
             if user is None or not user.age_18_plus_declared:
                 raise PermissionError("کاربر ثبت‌نام‌نشده یا شرایط سنی تأیید نشده است.")
+            await reconcile_user_suspension_in_session(session, user)
+            if user.status != "ACTIVE":
+                raise PermissionError("حساب کاربری شما غیرفعال یا تعلیق شده است.")
 
             # 2. Check if profile already exists
             if user.profile is not None:
@@ -202,16 +206,19 @@ class ProfileService:
         """Update a specific field on the user's profile with validation."""
         async with self._db_manager.session() as session:
             stmt = (
-                select(UserProfile)
+                select(UserProfile, User)
                 .join(User, User.id == UserProfile.user_id)
                 .where(User.telegram_user_id == telegram_user_id)
                 .where(User.status != "DELETED")
             )
-            res = await session.execute(stmt)
-            profile = res.scalar_one_or_none()
+            row = (await session.execute(stmt)).first()
 
-            if profile is None:
+            if row is None:
                 raise LookupError("پروفایلی برای این کاربر یافت نشد.")
+            profile, user = row
+            await reconcile_user_suspension_in_session(session, user)
+            if user.status != "ACTIVE":
+                raise PermissionError("حساب کاربری شما غیرفعال یا تعلیق شده است.")
 
             if field_name == "display_name":
                 profile.display_name = validate_display_name(str(new_value) if new_value else "")

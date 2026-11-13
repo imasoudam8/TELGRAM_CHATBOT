@@ -34,9 +34,14 @@ async def _handle_join_matching_flow(
     telegram_user_id: int,
     db_manager: DatabaseManager,
     redis_manager: RedisManager | None,
+    settings: Settings | None = None,
 ) -> None:
     user, err = await load_authorized_user(
-        db_manager, telegram_user_id, require_completed_profile=True
+        db_manager,
+        telegram_user_id,
+        require_completed_profile=True,
+        allow_chat_restricted=False,
+        settings=settings,
     )
     if err is not None or user is None:
         await reply_with_auth_error(target, err or MSG_GENERIC_ERROR)
@@ -99,7 +104,13 @@ async def handle_random_chat_menu_entry(
     resolved_db = db_manager or get_database_manager(resolved_settings)
 
     try:
-        await _handle_join_matching_flow(message, message.from_user.id, resolved_db, redis_manager)
+        await _handle_join_matching_flow(
+            message,
+            message.from_user.id,
+            resolved_db,
+            redis_manager,
+            settings=resolved_settings,
+        )
     except PermissionError as perm_err:
         await message.answer(str(perm_err), reply_markup=get_main_menu_keyboard())
     except Exception as exc:
@@ -123,7 +134,11 @@ async def handle_match_join_callback(
 
     try:
         await _handle_join_matching_flow(
-            callback.message, callback.from_user.id, resolved_db, redis_manager
+            callback.message,
+            callback.from_user.id,
+            resolved_db,
+            redis_manager,
+            settings=resolved_settings,
         )
     except PermissionError as perm_err:
         await callback.message.answer(str(perm_err), reply_markup=get_main_menu_keyboard())

@@ -5,11 +5,13 @@ import logging
 from aiogram import Router
 from aiogram.types import Message
 
+from src.app.bot.handlers.admin import get_admin_router
 from src.app.bot.handlers.chat import get_chat_router
 from src.app.bot.handlers.connections import get_connections_router
 from src.app.bot.handlers.direct_requests import get_direct_requests_router
 from src.app.bot.handlers.discovery import get_discovery_router
 from src.app.bot.handlers.matching import get_matching_router
+from src.app.bot.handlers.moderation import get_moderation_router
 from src.app.bot.handlers.onboarding import get_onboarding_router
 from src.app.bot.handlers.profile import get_profile_router
 from src.app.bot.handlers.wallet import get_wallet_router
@@ -36,6 +38,9 @@ def get_base_router() -> Router:
     """Factory creating the primary application router."""
     router = Router(name="base")
     router.include_router(get_onboarding_router())
+    # Report & admin FSM/command routers must precede chat_router's ActiveChatFilter catch-all
+    router.include_router(get_moderation_router())
+    router.include_router(get_admin_router())
     router.include_router(get_chat_router())
     router.include_router(get_profile_router())
     router.include_router(get_discovery_router())

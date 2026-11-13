@@ -280,7 +280,11 @@ async def handle_discovery_send_request_callback(
 
     try:
         user, err = await load_authorized_user(
-            resolved_db, callback.from_user.id, require_completed_profile=True
+            resolved_db,
+            callback.from_user.id,
+            require_completed_profile=True,
+            allow_chat_restricted=False,
+            settings=resolved_settings,
         )
         if err is not None or user is None:
             await callback.answer()

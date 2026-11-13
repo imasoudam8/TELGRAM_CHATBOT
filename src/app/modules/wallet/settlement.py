@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.app.config.settings import Settings, get_settings
 from src.app.infrastructure.database.base import get_business_date, now_utc
 from src.app.infrastructure.database.session import DatabaseManager
+from src.app.modules.admin.config_service import get_effective_chat_tariffs_in_session
 from src.app.modules.chat.models import ChatSession
 from src.app.modules.wallet.schemas import SettlementResult
 from src.app.modules.wallet.service import WalletService, _as_utc, _build_balance_dto
@@ -47,6 +48,22 @@ def get_settlement_charges_for_chat(chat: ChatSession) -> dict[int, int]:
     raise ValueError(f"نوع گفتگوی نامعتبر برای تسویه: {chat.chat_type}")
 
 
+async def get_settlement_charges_for_chat_in_session(
+    session: AsyncSession,
+    chat: ChatSession,
+) -> dict[int, int]:
+    """Resolve effective coin charges from SystemConfiguration honoring defaults."""
+    random_cost, direct_cost = await get_effective_chat_tariffs_in_session(session)
+    if chat.chat_type == "RANDOM":
+        return {
+            chat.participant_one_id: random_cost,
+            chat.participant_two_id: random_cost,
+        }
+    if chat.chat_type == "DIRECT":
+        return {chat.participant_one_id: direct_cost}
+    raise ValueError(f"نوع گفتگوی نامعتبر برای تسویه: {chat.chat_type}")
+
+
 class ChatSettlementService:
     """Coordinates idempotent, concurrency-safe PostgreSQL chat settlement."""
 
@@ -54,6 +71,11 @@ class ChatSettlementService:
         self._db_manager = db_manager
         self._settings = settings or get_settings()
         self._wallet_service = WalletService(db_manager, self._settings)
+
+    async def get_effective_tariffs(self) -> tuple[int, int]:
+        """Return active (random_chat_cost_coins, direct_chat_cost_coins)."""
+        async with self._db_manager.session() as session:
+            return await get_effective_chat_tariffs_in_session(session)
 
     async def settle_chat_in_session(
         self,
@@ -95,7 +117,7 @@ class ChatSettlementService:
                 reason="تا زمانی که هر دو طرف حداقل یک پیام ارسال نکنند، هزینه‌ای کسر نمی‌شود.",
             )
 
-        charges_by_user = get_settlement_charges_for_chat(chat)
+        charges_by_user = await get_settlement_charges_for_chat_in_session(session, chat)
         ordered_payer_ids = sorted(charges_by_user.keys())
 
         # Deterministic ascending user_id lock order across wallets & daily allowances

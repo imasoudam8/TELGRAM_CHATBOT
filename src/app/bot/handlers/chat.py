@@ -363,7 +363,12 @@ async def handle_chat_relay_message(
         return
 
     try:
-        user, err = await load_authorized_user(resolved_db, message.from_user.id)
+        user, err = await load_authorized_user(
+            resolved_db,
+            message.from_user.id,
+            allow_chat_restricted=False,
+            settings=resolved_settings,
+        )
         if err is not None or user is None:
             await reply_with_auth_error(message, err or MSG_GENERIC_ERROR)
             return

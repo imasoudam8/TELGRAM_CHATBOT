@@ -36,6 +36,11 @@ from src.app.bot.keyboards.profile import (
 from src.app.bot.states import ProfileCreationSG, ProfileEditSG
 from src.app.config.settings import Settings, get_settings
 from src.app.infrastructure.database.session import DatabaseManager, get_database_manager
+from src.app.modules.moderation.enforcement import (
+    AccountRestrictionStatus,
+    as_utc,
+    format_account_restriction_message,
+)
 from src.app.modules.profiles.service import (
     ProfileData,
     ProfileService,
@@ -167,6 +172,21 @@ async def handle_profile_menu_entry(
             await message.answer(
                 MSG_UNREGISTERED_DENIED,
                 reply_markup=get_age_declaration_keyboard(),
+            )
+            return
+
+        if user.status in {"SUSPENDED", "BANNED"}:
+            await message.answer(
+                format_account_restriction_message(
+                    AccountRestrictionStatus(
+                        user_id=user.id,
+                        account_status=user.status,
+                        is_chat_restricted=True,
+                        restriction_reason=user.suspension_reason,
+                        expires_at=(as_utc(user.suspended_until) if user.suspended_until else None),
+                    ),
+                    settings=settings,
+                )
             )
             return
 
@@ -397,6 +417,9 @@ async def handle_confirm_create_callback(
                 reply_markup=get_view_profile_keyboard(),
             )
 
+    except PermissionError as perm_err:
+        if isinstance(callback.message, Message):
+            await callback.message.answer(f"🚫 {html.escape(str(perm_err))}")
     except Exception as exc:
         logger.error("Error creating profile for user %s: %s", telegram_user_id, exc)
         if isinstance(callback.message, Message):
@@ -494,6 +517,9 @@ async def handle_edit_display_name_input(
             format_profile_view(updated, is_new=False),
             reply_markup=get_view_profile_keyboard(),
         )
+    except PermissionError as perm_err:
+        await state.clear()
+        await message.answer(f"🚫 {html.escape(str(perm_err))}")
     except Exception as exc:
         logger.error("Error updating name for user %s: %s", telegram_user_id, exc)
         await message.answer(MSG_DATABASE_ERROR)
@@ -531,6 +557,9 @@ async def handle_edit_age_input(
             format_profile_view(updated, is_new=False),
             reply_markup=get_view_profile_keyboard(),
         )
+    except PermissionError as perm_err:
+        await state.clear()
+        await message.answer(f"🚫 {html.escape(str(perm_err))}")
     except Exception as exc:
         logger.error("Error updating age for user %s: %s", telegram_user_id, exc)
         await message.answer(MSG_DATABASE_ERROR)
@@ -574,6 +603,10 @@ async def handle_edit_gender_callback(
                 format_profile_view(updated, is_new=False),
                 reply_markup=get_view_profile_keyboard(),
             )
+    except PermissionError as perm_err:
+        await state.clear()
+        if isinstance(callback.message, Message):
+            await callback.message.answer(f"🚫 {html.escape(str(perm_err))}")
     except Exception as exc:
         logger.error("Error updating gender for user %s: %s", telegram_user_id, exc)
         if isinstance(callback.message, Message):
@@ -612,6 +645,9 @@ async def handle_edit_city_input(
             format_profile_view(updated, is_new=False),
             reply_markup=get_view_profile_keyboard(),
         )
+    except PermissionError as perm_err:
+        await state.clear()
+        await message.answer(f"🚫 {html.escape(str(perm_err))}")
     except Exception as exc:
         logger.error("Error updating city for user %s: %s", telegram_user_id, exc)
         await message.answer(MSG_DATABASE_ERROR)
@@ -649,6 +685,9 @@ async def handle_edit_bio_input(
             format_profile_view(updated, is_new=False),
             reply_markup=get_view_profile_keyboard(),
         )
+    except PermissionError as perm_err:
+        await state.clear()
+        await message.answer(f"🚫 {html.escape(str(perm_err))}")
     except Exception as exc:
         logger.error("Error updating bio for user %s: %s", telegram_user_id, exc)
         await message.answer(MSG_DATABASE_ERROR)

@@ -9,6 +9,10 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
+from src.app.bot.keyboards.moderation import (
+    CB_REPORT_START_CHAT_PREFIX,
+    CB_REPORT_START_USER_PREFIX,
+)
 from src.app.modules.chat.connections import ConnectionItemDTO
 
 # Active chat reply keyboard buttons
@@ -68,7 +72,13 @@ def get_active_chat_inline_keyboard(chat_id: uuid.UUID) -> InlineKeyboardMarkup:
                     text="🚫 مسدود کردن",
                     callback_data=f"{CB_CHAT_BLK_PREFIX}{hex_id}",
                 ),
-            ]
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🚨 گزارش تخلف",
+                    callback_data=f"{CB_REPORT_START_CHAT_PREFIX}{hex_id}",
+                )
+            ],
         ]
     )
 
@@ -208,6 +218,14 @@ def get_connection_detail_keyboard(
                 text="🚫 مسدود کردن",
                 callback_data=f"{CB_CONN_BLK_PREFIX}{public_id}",
             ),
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🚨 گزارش تخلف",
+                callback_data=f"{CB_REPORT_START_USER_PREFIX}{public_id}",
+            )
         ]
     )
     rows.append(

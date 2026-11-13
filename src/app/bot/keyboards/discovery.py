@@ -2,6 +2,7 @@
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from src.app.bot.keyboards.moderation import CB_REPORT_START_USER_PREFIX
 from src.app.modules.discovery.schemas import DiscoveryPageDTO, PublicProfileDTO, UserPreferencesDTO
 
 # Callback prefixes and static actions (all compact <= 42 bytes)
@@ -39,7 +40,13 @@ def get_discovery_profile_keyboard(
                 text="🚫 مسدود کردن",
                 callback_data=f"{CB_DISC_BLK_PREFIX}{profile.public_id}",
             ),
-        ]
+        ],
+        [
+            InlineKeyboardButton(
+                text="🚨 گزارش تخلف",
+                callback_data=f"{CB_REPORT_START_USER_PREFIX}{profile.public_id}",
+            )
+        ],
     ]
 
     nav_row: list[InlineKeyboardButton] = []
@@ -127,7 +134,13 @@ def get_public_profile_detail_keyboard(
                 text="🔎 مرور پروفایل‌ها",
                 callback_data=f"{CB_DISC_BROWSE_PREFIX}0:0",
             ),
-        ]
+        ],
+        [
+            InlineKeyboardButton(
+                text="🚨 گزارش تخلف",
+                callback_data=f"{CB_REPORT_START_USER_PREFIX}{profile.public_id}",
+            )
+        ],
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

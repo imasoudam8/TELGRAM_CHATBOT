@@ -24,7 +24,11 @@ from src.app.infrastructure.database.base import to_business_tz
 from src.app.infrastructure.database.session import DatabaseManager, get_database_manager
 from src.app.modules.wallet.schemas import LedgerEntryDTO, WalletBalanceDTO
 from src.app.modules.wallet.service import WalletService
-from src.app.modules.wallet.settlement import DIRECT_CHAT_COST_COINS, RANDOM_CHAT_COST_COINS
+from src.app.modules.wallet.settlement import (
+    DIRECT_CHAT_COST_COINS,
+    RANDOM_CHAT_COST_COINS,
+    ChatSettlementService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +49,13 @@ CREDIT_TYPE_LABELS: dict[str, str] = {
 }
 
 
-def format_wallet_summary(balance: WalletBalanceDTO, settings: Settings) -> str:
+def format_wallet_summary(
+    balance: WalletBalanceDTO,
+    settings: Settings,
+    *,
+    random_cost: int = RANDOM_CHAT_COST_COINS,
+    direct_cost: int = DIRECT_CHAT_COST_COINS,
+) -> str:
     """Format Persian HTML wallet balance overview cleanly without exposing sensitive IDs."""
     expiry_note = "فعال نیست (سهمیه امروز مصرف شده یا هنوز اختصاص نیافته است)"
     if balance.free_expires_at is not None:
@@ -59,9 +69,9 @@ def format_wallet_summary(balance: WalletBalanceDTO, settings: Settings) -> str:
         f"💰 مجموع موجودی قابل مصرف: <b>{balance.total_spendable_coins}</b>\n"
         f"⏳ اعتبار سهمیه رایگان: {html.escape(expiry_note)}\n\n"
         "📌 <b>تعرفه گفتگوها:</b>\n"
-        f"• گفتگوی تصادفی: {RANDOM_CHAT_COST_COINS} سکه برای هر نفر "
+        f"• گفتگوی تصادفی: {random_cost} سکه برای هر نفر "
         "(پس از ارسال پیام توسط هر دو طرف)\n"
-        f"• درخواست مستقیم: {DIRECT_CHAT_COST_COINS} سکه فقط برای درخواست‌دهنده "
+        f"• درخواست مستقیم: {direct_cost} سکه فقط برای درخواست‌دهنده "
         "(پس از ارسال پیام توسط هر دو طرف)\n"
         "• اولویت مصرف همیشه با سهمیه رایگان روزانه است."
     )
@@ -110,8 +120,16 @@ async def handle_wallet_menu_entry(
         balance = await WalletService(resolved_db, resolved_settings).get_wallet_balance(
             user.id, auto_allocate_daily=True
         )
+        random_cost, direct_cost = await ChatSettlementService(
+            resolved_db, resolved_settings
+        ).get_effective_tariffs()
         await message.answer(
-            format_wallet_summary(balance, resolved_settings),
+            format_wallet_summary(
+                balance,
+                resolved_settings,
+                random_cost=random_cost,
+                direct_cost=direct_cost,
+            ),
             reply_markup=get_wallet_menu_keyboard(),
         )
     except Exception as exc:
@@ -141,8 +159,16 @@ async def handle_wallet_refresh_callback(
         balance = await WalletService(resolved_db, resolved_settings).get_wallet_balance(
             user.id, auto_allocate_daily=True
         )
+        random_cost, direct_cost = await ChatSettlementService(
+            resolved_db, resolved_settings
+        ).get_effective_tariffs()
         await callback.message.answer(
-            format_wallet_summary(balance, resolved_settings),
+            format_wallet_summary(
+                balance,
+                resolved_settings,
+                random_cost=random_cost,
+                direct_cost=direct_cost,
+            ),
             reply_markup=get_wallet_menu_keyboard(),
         )
     except Exception as exc:
