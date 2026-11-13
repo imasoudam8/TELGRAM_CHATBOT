@@ -4,9 +4,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message, User as TelegramUser
+from aiogram.types import CallbackQuery, Message
+from aiogram.types import User as TelegramUser
 
 from src.app.bot.handlers.profile import (
+    format_profile_view,
+    format_review_summary,
     handle_cancel_edit_callback,
     handle_creation_age,
     handle_creation_gender,
@@ -336,3 +339,61 @@ async def test_database_errors_do_not_leak_internal_details() -> None:
     assert "PostgreSQL" not in args[0]
     assert "FATAL" not in args[0]
     assert "خطایی رخ داده است" in args[0]
+
+
+def test_format_profile_view_escapes_html_injection() -> None:
+    """Verify malicious HTML tags in display_name, city, and bio are escaped literally."""
+    malicious_profile = UserProfile(
+        user_id=1,
+        age_18_plus_declared=True,
+        age=25,
+        display_name="<b>Hacker</b> & <script>",
+        gender="MALE",
+        city="<img src=x onerror=alert(1)>",
+        bio="Hello <i>world</i> & 'quotes' \"double\"",
+        completion_status="COMPLETED",
+        visibility="PUBLIC",
+    )
+
+    rendered = format_profile_view(malicious_profile, is_new=False)
+
+    # Must contain escaped entities
+    assert "&lt;b&gt;Hacker&lt;/b&gt; &amp; &lt;script&gt;" in rendered
+    assert "&lt;img src=x onerror=alert(1)&gt;" in rendered
+    assert "&lt;i&gt;world&lt;/i&gt; &amp; &#x27;quotes&#x27; &quot;double&quot;" in rendered
+
+    # Must NOT contain raw unescaped user tags
+    assert "<b>Hacker</b>" not in rendered
+    assert "<script>" not in rendered
+    assert "<img src=x onerror=alert(1)>" not in rendered
+    assert "<i>world</i>" not in rendered
+
+    # Trusted structure HTML tags should remain intact
+    assert "<b>نام نمایشی:</b>" in rendered
+    assert "<b>سن:</b>" in rendered
+    assert "<b>شهر:</b>" in rendered
+    assert "<b>درباره من:</b>" in rendered
+
+
+def test_format_review_summary_escapes_html_injection() -> None:
+    """Verify malicious HTML tags in review summary dictionary are escaped literally."""
+    data = {
+        "display_name": "<b>BoldName</b>",
+        "age": 30,
+        "gender": "FEMALE",
+        "city": "Tehran <city>",
+        "bio": "Bio & <span style='color:red'>alert</span>",
+    }
+
+    summary = format_review_summary(data)
+
+    assert "&lt;b&gt;BoldName&lt;/b&gt;" in summary
+    assert "Tehran &lt;city&gt;" in summary
+    assert "Bio &amp; &lt;span style=&#x27;color:red&#x27;&gt;alert&lt;/span&gt;" in summary
+
+    assert "<b>BoldName</b>" not in summary
+    assert "<city>" not in summary
+    assert "style='color:red'" not in summary
+
+    # Trusted structure HTML tags should remain intact
+    assert "<b>پیش‌نمایش و تأیید نهایی پروفایل</b>" in summary

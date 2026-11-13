@@ -1,5 +1,6 @@
 """Handlers for user profile creation, inspection, and editing."""
 
+import html
 import logging
 
 from aiogram import F, Router
@@ -96,8 +97,9 @@ MSG_DATABASE_ERROR = (
 def format_profile_view(profile: UserProfile, is_new: bool = False) -> str:
     """Format user profile for display in Persian."""
     gender_persian = GENDER_LABELS.get(profile.gender, profile.gender)
-    city_text = profile.city if profile.city else "<i>ثبت نشده</i>"
-    bio_text = profile.bio if profile.bio else "<i>ثبت نشده</i>"
+    escaped_name = html.escape(profile.display_name)
+    city_text = html.escape(profile.city) if profile.city else "<i>ثبت نشده</i>"
+    bio_text = html.escape(profile.bio) if profile.bio else "<i>ثبت نشده</i>"
     status_text = "✅ تکمیل شده" if profile.completion_status == "COMPLETED" else "⏳ ناقص"
 
     title = (
@@ -106,7 +108,7 @@ def format_profile_view(profile: UserProfile, is_new: bool = False) -> str:
 
     return (
         f"{title}"
-        f"🏷 <b>نام نمایشی:</b> {profile.display_name}\n"
+        f"🏷 <b>نام نمایشی:</b> {escaped_name}\n"
         f"🎂 <b>سن:</b> {profile.age} سال\n"
         f"⚧ <b>جنسیت:</b> {gender_persian}\n"
         f"🏙 <b>شهر:</b> {city_text}\n"
@@ -119,12 +121,16 @@ def format_profile_view(profile: UserProfile, is_new: bool = False) -> str:
 def format_review_summary(data: dict) -> str:
     """Format entered profile data before final confirmation."""
     gender_persian = GENDER_LABELS.get(data.get("gender", ""), data.get("gender", ""))
-    city_text = data.get("city") or "<i>ثبت نشده</i>"
-    bio_text = data.get("bio") or "<i>ثبت نشده</i>"
+    raw_name = data.get("display_name") or ""
+    escaped_name = html.escape(raw_name)
+    raw_city = data.get("city")
+    city_text = html.escape(raw_city) if raw_city else "<i>ثبت نشده</i>"
+    raw_bio = data.get("bio")
+    bio_text = html.escape(raw_bio) if raw_bio else "<i>ثبت نشده</i>"
 
     return (
         "🔍 <b>پیش‌نمایش و تأیید نهایی پروفایل</b>\n\n"
-        f"🏷 <b>نام نمایشی:</b> {data.get('display_name')}\n"
+        f"🏷 <b>نام نمایشی:</b> {escaped_name}\n"
         f"🎂 <b>سن:</b> {data.get('age')} سال\n"
         f"⚧ <b>جنسیت:</b> {gender_persian}\n"
         f"🏙 <b>شهر:</b> {city_text}\n"
