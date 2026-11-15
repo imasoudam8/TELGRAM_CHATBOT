@@ -111,3 +111,58 @@ def test_configure_logging_executes_cleanly(test_settings: Settings) -> None:
     configure_logging(test_settings)
     root = logging.getLogger()
     assert len(root.handlers) > 0
+
+
+def test_structured_formatter_redacts_exception_and_extra_secrets() -> None:
+    """Verify secrets inside exception tracebacks and extra payloads are scrubbed."""
+    scrubber = SensitiveDataFilter(additional_secrets=["UltraSecretDbPass_99!"])
+    formatter = StructuredJsonFormatter(scrubber=scrubber)
+    try:
+        raise RuntimeError(
+            "Connection failed for postgresql+asyncpg://postgres:UltraSecretDbPass_99!@db:5432/app "
+            "with token 987654321:ABCdefGhIJKlmNoPQRsTUVwxyZ12345"
+        )
+    except RuntimeError as exc:
+        record = logging.LogRecord(
+            name="test_logger",
+            level=logging.ERROR,
+            pathname="test.py",
+            lineno=20,
+            msg="Failure occurred",
+            args=(),
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        record.dsn = "redis://:UltraSecretDbPass_99!@redis:6379/0"
+        rendered = formatter.format(record)
+
+    assert "UltraSecretDbPass_99!" not in rendered
+    assert "987654321:ABCdefGhIJKlmNoPQRsTUVwxyZ12345" not in rendered
+    assert "[REDACTED_DB_PASSWORD]" in rendered
+    assert "[REDACTED_BOT_TOKEN]" in rendered
+    assert "[REDACTED_REDIS_PASSWORD]" in rendered
+
+
+def test_configure_logging_creates_bounded_rotating_file_handler(
+    test_settings: Settings,
+    tmp_path,
+) -> None:
+    """Verify LOG_FILE_PATH enables RotatingFileHandler with size/count limits."""
+    from logging.handlers import RotatingFileHandler
+
+    log_file = tmp_path / "logs" / "bot.log"
+    file_settings = test_settings.model_copy(
+        update={
+            "LOG_FILE_PATH": str(log_file),
+            "LOG_MAX_BYTES": 2048,
+            "LOG_BACKUP_COUNT": 3,
+        }
+    )
+    configure_logging(file_settings)
+    try:
+        root = logging.getLogger()
+        rotating = [h for h in root.handlers if isinstance(h, RotatingFileHandler)]
+        assert len(rotating) == 1
+        assert rotating[0].maxBytes == 2048
+        assert rotating[0].backupCount == 3
+    finally:
+        configure_logging(test_settings)

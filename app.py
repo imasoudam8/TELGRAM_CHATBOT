@@ -111,7 +111,57 @@ class HealthAndDiagnosticHandler(http.server.BaseHTTPRequestHandler):
         self._send_headers(content_type="text/html; charset=utf-8", content_len=len(encoded_body))
 
     def do_GET(self) -> None:
-        """Respond to GET requests with HTML console or JSON health check."""
+        """Respond to GET requests with HTML console, JSON liveness, or deep readiness check."""
+        if self.path in ("/ready", "/readyz"):
+            try:
+                import asyncio
+                import subprocess
+                from pathlib import Path
+
+                try:
+                    from src.app.config.settings import get_settings
+                    from src.app.infrastructure.healthcheck import run_health_checks
+
+                    settings = get_settings()
+                    is_healthy, details = asyncio.run(
+                        run_health_checks(settings, check_migrations=False, timeout_seconds=5.0)
+                    )
+                    status = HTTPStatus.OK if is_healthy else HTTPStatus.SERVICE_UNAVAILABLE
+                    payload = json.dumps(details).encode("utf-8")
+                except ModuleNotFoundError:
+                    venv_python = Path(__file__).resolve().parent / ".venv" / "bin" / "python"
+                    if not venv_python.exists():
+                        raise
+                    proc = subprocess.run(
+                        [str(venv_python), "-m", "src.app.infrastructure.healthcheck"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        check=False,
+                    )
+                    status = (
+                        HTTPStatus.OK if proc.returncode == 0 else HTTPStatus.SERVICE_UNAVAILABLE
+                    )
+                    raw_out = (proc.stdout or "").strip()
+                    payload = (
+                        raw_out.encode("utf-8")
+                        if raw_out
+                        else json.dumps({"status": "unhealthy"}).encode("utf-8")
+                    )
+            except Exception as exc:
+                status = HTTPStatus.SERVICE_UNAVAILABLE
+                payload = json.dumps(
+                    {"status": "unhealthy", "error": f"Readiness error: {type(exc).__name__}"}
+                ).encode("utf-8")
+
+            self._send_headers(
+                content_type="application/json",
+                content_len=len(payload),
+                status=status,
+            )
+            self.wfile.write(payload)
+            return
+
         if self.path in ("/health", "/healthz", "/api/health"):
             payload = json.dumps({"status": "healthy", "service": "telegram-matching-bot"}).encode(
                 "utf-8"
@@ -124,8 +174,13 @@ class HealthAndDiagnosticHandler(http.server.BaseHTTPRequestHandler):
         self._send_headers(content_type="text/html; charset=utf-8", content_len=len(body))
         self.wfile.write(body)
 
-    def _send_headers(self, content_type: str, content_len: int) -> None:
-        self.send_response(HTTPStatus.OK)
+    def _send_headers(
+        self,
+        content_type: str,
+        content_len: int,
+        status: HTTPStatus = HTTPStatus.OK,
+    ) -> None:
+        self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(content_len))
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")

@@ -2,7 +2,7 @@
 # Multi-stage Dockerfile for Anonymous Telegram Matching & Chat Bot
 
 # ------------------------------------------------------------------------------
-# Builder Stage: Install build dependencies and build wheels / virtualenv
+# Builder Stage: Install build dependencies and build virtualenv
 # ------------------------------------------------------------------------------
 FROM python:3.12-slim-bookworm AS builder
 
@@ -37,7 +37,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:$PATH" \
     PYTHONPATH="/app"
 
-# Install curl for health checks if needed
+# Install curl for optional local probing
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
@@ -51,17 +51,19 @@ WORKDIR /app
 # Copy virtualenv from builder
 COPY --from=builder /opt/venv /opt/venv
 
-# Copy application source code and scripts
+# Copy application source code and operational scripts
 COPY --chown=appuser:appgroup alembic.ini .
 COPY --chown=appuser:appgroup migrations ./migrations
 COPY --chown=appuser:appgroup scripts ./scripts
 COPY --chown=appuser:appgroup src ./src
 
-RUN chmod +x scripts/*.sh
+RUN chmod +x scripts/*.sh scripts/*.py
 
 USER appuser
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+STOPSIGNAL SIGTERM
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
     CMD python -m src.app.infrastructure.healthcheck || exit 1
 
 ENTRYPOINT ["./scripts/run_bot.sh"]

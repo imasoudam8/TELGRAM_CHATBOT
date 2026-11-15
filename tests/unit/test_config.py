@@ -141,3 +141,39 @@ def test_redis_url_generation(test_settings: Settings) -> None:
     """Verify Redis connection URL contains credentials and logical database."""
     redis_url = test_settings.redis_url
     assert redis_url == "redis://:test_redis_pass@localhost:6379/15"
+
+
+def test_production_constraints_require_strong_redis_password_and_echo_false() -> None:
+    """Ensure production requires strong REDIS_PASSWORD and disables POSTGRES_ECHO."""
+    with pytest.raises(ValidationError, match="REDIS_PASSWORD"):
+        Settings(
+            APP_ENV=AppEnvironment.PRODUCTION,
+            BOT_TOKEN=SecretStr("123456789:ValidProductionBotTokenHash12345"),
+            POSTGRES_PASSWORD=SecretStr("StrongProductionPassword123!"),
+            REDIS_PASSWORD=None,
+        )
+
+    with pytest.raises(ValidationError, match="REDIS_PASSWORD"):
+        Settings(
+            APP_ENV=AppEnvironment.PRODUCTION,
+            BOT_TOKEN=SecretStr("123456789:ValidProductionBotTokenHash12345"),
+            POSTGRES_PASSWORD=SecretStr("StrongProductionPassword123!"),
+            REDIS_PASSWORD=SecretStr("short"),
+        )
+
+    with pytest.raises(ValidationError, match="POSTGRES_ECHO=false"):
+        Settings(
+            APP_ENV=AppEnvironment.PRODUCTION,
+            BOT_TOKEN=SecretStr("123456789:ValidProductionBotTokenHash12345"),
+            POSTGRES_PASSWORD=SecretStr("StrongProductionPassword123!"),
+            REDIS_PASSWORD=SecretStr("StrongRedisPassword123!"),
+            POSTGRES_ECHO=True,
+        )
+
+    valid_prod = Settings(
+        APP_ENV=AppEnvironment.PRODUCTION,
+        BOT_TOKEN=SecretStr("123456789:ValidProductionBotTokenHash12345"),
+        POSTGRES_PASSWORD=SecretStr("StrongProductionPassword123!"),
+        REDIS_PASSWORD=SecretStr("StrongRedisPassword123!"),
+    )
+    assert valid_prod.effective_require_migrations_current is True

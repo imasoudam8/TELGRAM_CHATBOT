@@ -1,12 +1,10 @@
 # Anonymous Telegram Matching & Chat Bot
 
-> **TASK 001** — Project Foundation & Engineering Infrastructure (Scaffolding Phase)
-
-A typed, asynchronous Python backend and engineering infrastructure for the **Anonymous Telegram Matching & Chat Bot**. 
+A typed, asynchronous Python backend for the **Anonymous Telegram Matching & Chat Bot** covering adult onboarding, user profiles, discovery, random matching, direct requests, anonymous chat relay, Chat Coins wallet & settlement, Telegram-native RBAC moderation/admin panel, and production deployment tooling.
 
 All user interactions, matchmaking workflows, chat mediation, and administration occur exclusively within Telegram via the Telegram Bot API (`aiogram`). The repository contains no web frontend, HTML interface, JavaScript/TypeScript client, or browser dashboard.
 
-*Note: This repository represents foundation scaffolding and engineering infrastructure (scaffolding phase). It does not implement product features (such as user registration or chat routing) and is not yet designated for production deployment.*
+Operational deployment, migration safety, encrypted off-server backup/restore, health checks, rollback rules, and `SUPER_ADMIN` bootstrapping are documented in [`docs/operations/deployment-and-recovery.md`](docs/operations/deployment-and-recovery.md).
 
 ---
 

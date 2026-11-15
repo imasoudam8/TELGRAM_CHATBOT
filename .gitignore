@@ -27,6 +27,14 @@ ENV/
 coverage/
 htmlcov/
 
-# Local databases and runtime state
+# Local databases, backups, and runtime state
 *.db
 *.sqlite3
+*.rdb
+*.dump
+*.sql
+*.sql.gz
+*.gpg
+*.pem
+*.key
+backups/

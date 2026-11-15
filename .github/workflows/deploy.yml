@@ -1,0 +1,117 @@
+name: Production Deploy (Manual Trigger)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_production_deploy:
+        description: "Type DEPLOY to authorize production VPS rollout"
+        required: true
+        type: string
+
+concurrency:
+  group: production-deployment
+  cancel-in-progress: false
+
+jobs:
+  ci-validation:
+    name: Prerequisite CI Validation
+    uses: ./.github/workflows/ci.yml
+    if: inputs.confirm_production_deploy == 'DEPLOY'
+
+  deploy-to-vps:
+    name: Build & Safe Rollout with App-Only Rollback
+    runs-on: ubuntu-latest
+    needs: ci-validation
+    if: inputs.confirm_production_deploy == 'DEPLOY'
+    environment: production
+
+    steps:
+      - name: Verify Explicit Authorization & Required VPS Secrets
+        run: |
+          if [ -z "${{ secrets.VPS_HOST }}" ] || [ -z "${{ secrets.VPS_USER }}" ] \
+             || [ -z "${{ secrets.VPS_SSH_KEY }}" ] || [ -z "${{ secrets.VPS_DEPLOY_PATH }}" ]; then
+            echo "ERROR: Production VPS secrets (VPS_HOST, VPS_USER, VPS_SSH_KEY, VPS_DEPLOY_PATH) are not configured."
+            exit 1
+          fi
+
+      - name: Checkout Code Repository
+        uses: actions/checkout@v4
+
+      - name: Build Production Docker Image Artifact
+        run: |
+          IMAGE_TAG="sha-${GITHUB_SHA::12}"
+          docker build -t "telegram-matching-bot:${IMAGE_TAG}" .
+          docker save "telegram-matching-bot:${IMAGE_TAG}" | gzip > image.tar.gz
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_ENV"
+
+      - name: Deploy to VPS with Pre-Deploy Backup, Forward Migration & Health Verification
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+          VPS_DEPLOY_PATH: ${{ secrets.VPS_DEPLOY_PATH }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 ~/.ssh
+          trap 'rm -f ~/.ssh/deploy_key' EXIT
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$VPS_PORT" -H "$VPS_HOST" >> ~/.ssh/known_hosts
+
+          scp -i ~/.ssh/deploy_key -P "$VPS_PORT" -r \
+            image.tar.gz docker-compose.yml docker-compose.prod.yml scripts \
+            "${VPS_USER}@${VPS_HOST}:${VPS_DEPLOY_PATH}/"
+
+          ssh -i ~/.ssh/deploy_key -p "$VPS_PORT" "${VPS_USER}@${VPS_HOST}" bash -s -- "$VPS_DEPLOY_PATH" "$IMAGE_TAG" <<'REMOTE_EOF'
+          set -euo pipefail
+          DEPLOY_PATH="$1"
+          NEW_TAG="$2"
+          cd "$DEPLOY_PATH"
+
+          PREV_IMAGE="$(docker inspect --format='{{.Config.Image}}' matching_bot_app 2>/dev/null || echo '')"
+          echo "$PREV_IMAGE" > .previous_bot_image
+
+          docker load < image.tar.gz
+          rm -f image.tar.gz
+
+          # Ensure PostgreSQL and Redis are healthy before backup/migration
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d postgres redis
+
+          # Pre-deploy database backup (never ignore backup failure)
+          if [ -x "./scripts/backup_postgres.py" ]; then
+            ./scripts/backup_postgres.py --backup-dir "${DEPLOY_PATH}/backups"
+          fi
+
+          # Forward-only Alembic migration (never destructive downgrade)
+          BOT_IMAGE="telegram-matching-bot:${NEW_TAG}" \
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm --entrypoint ./scripts/run_migrations.sh bot
+
+          # Roll out new application container cleanly
+          BOT_IMAGE="telegram-matching-bot:${NEW_TAG}" \
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-deps bot
+
+          # Health verification loop
+          HEALTHY=0
+          for _ in $(seq 1 18); do
+            if docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T bot \
+               python -m src.app.infrastructure.healthcheck --check-migrations >/dev/null 2>&1; then
+              HEALTHY=1
+              break
+            fi
+            sleep 5
+          done
+
+          if [ "$HEALTHY" -ne 1 ]; then
+            echo "ERROR: Deployment health check failed; rolling back application container ONLY (no DB downgrade)."
+            if [ -n "$PREV_IMAGE" ]; then
+              BOT_IMAGE="$PREV_IMAGE" \
+                docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-deps bot
+              docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T bot \
+                python -m src.app.infrastructure.healthcheck || true
+            fi
+            exit 1
+          fi
+
+          echo "Deployment succeeded with image telegram-matching-bot:${NEW_TAG}"
+          REMOTE_EOF

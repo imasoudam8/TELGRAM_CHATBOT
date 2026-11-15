@@ -134,6 +134,45 @@ class Settings(BaseSettings):
         default="json",
         description="Log output format: json or console",
     )
+    LOG_FILE_PATH: str | None = Field(
+        default=None,
+        description="Optional rotating log file path for non-containerized deployments",
+    )
+    LOG_MAX_BYTES: int = Field(
+        default=10 * 1024 * 1024,
+        ge=1024,
+        le=100 * 1024 * 1024,
+        description="Maximum size in bytes per rotated log file",
+    )
+    LOG_BACKUP_COUNT: int = Field(
+        default=5,
+        ge=1,
+        le=50,
+        description="Number of rotated log backup files to retain",
+    )
+
+    # Migration Readiness & Internal Health Endpoint
+    REQUIRE_MIGRATIONS_CURRENT: bool | None = Field(
+        default=None,
+        description=(
+            "Verify database schema matches Alembic head on startup "
+            "(defaults to true in production/staging)"
+        ),
+    )
+    HEALTH_SERVER_ENABLED: bool = Field(
+        default=False,
+        description="Enable lightweight internal HTTP /health and /ready endpoint",
+    )
+    HEALTH_HOST: str = Field(
+        default="127.0.0.1",
+        description="Bind host for internal HTTP health endpoint",
+    )
+    HEALTH_PORT: int = Field(
+        default=8080,
+        ge=1,
+        le=65535,
+        description="Bind port for internal HTTP health endpoint",
+    )
 
     @field_validator("TIMEZONE")
     @classmethod
@@ -184,24 +223,59 @@ class Settings(BaseSettings):
     def validate_production_constraints(self) -> "Settings":
         """Enforce strict security constraints when running in production."""
         if self.APP_ENV == AppEnvironment.PRODUCTION:
-            raw_token = self.BOT_TOKEN.get_secret_value()
-            if "EXAMPLE" in raw_token or "TEST" in raw_token:
+            raw_token = self.BOT_TOKEN.get_secret_value().strip()
+            upper_token = raw_token.upper()
+            if any(
+                marker in upper_token
+                for marker in ("EXAMPLE", "TEST", "PLACEHOLDER", "CHANGEME", "YOUR_")
+            ):
                 raise ValueError("Production environment cannot use example or test bot tokens.")
 
-            raw_db_pass = self.POSTGRES_PASSWORD.get_secret_value()
-            if raw_db_pass in {
+            raw_db_pass = self.POSTGRES_PASSWORD.get_secret_value().strip()
+            weak_passwords = {
+                "",
                 "postgres",
                 "password",
                 "root",
                 "admin",
                 "123456",
+                "changeme",
+                "secret",
+                "test",
                 "postgres_secure_dev_password",
-            }:
+            }
+            if raw_db_pass.lower() in weak_passwords or len(raw_db_pass) < 12:
                 raise ValueError(
                     "Production environment must not use trivial or default database passwords."
                 )
 
+            raw_redis_pass = (
+                self.REDIS_PASSWORD.get_secret_value().strip() if self.REDIS_PASSWORD else ""
+            )
+            if (
+                not raw_redis_pass
+                or raw_redis_pass.lower() in weak_passwords
+                or len(raw_redis_pass) < 12
+            ):
+                raise ValueError(
+                    "Production environment requires a non-trivial REDIS_PASSWORD "
+                    "(minimum 12 characters)."
+                )
+
+            if self.POSTGRES_ECHO:
+                raise ValueError(
+                    "Production environment must set POSTGRES_ECHO=false to avoid "
+                    "logging SQL statements."
+                )
+
         return self
+
+    @property
+    def effective_require_migrations_current(self) -> bool:
+        """Whether startup must enforce database schema alignment with Alembic head."""
+        if self.REQUIRE_MIGRATIONS_CURRENT is not None:
+            return self.REQUIRE_MIGRATIONS_CURRENT
+        return self.APP_ENV in {AppEnvironment.PRODUCTION, AppEnvironment.STAGING}
 
     @property
     def business_zoneinfo(self) -> ZoneInfo:

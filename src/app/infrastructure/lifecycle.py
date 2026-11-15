@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from aiogram import Bot, Dispatcher
 
 from src.app.config.settings import Settings
+from src.app.infrastructure.database.migrations import assert_database_migrations_current
 from src.app.infrastructure.database.session import DatabaseManager, get_database_manager
+from src.app.infrastructure.health_server import HealthHttpServer
 from src.app.infrastructure.redis.client import RedisManager, get_redis_manager
 from src.app.infrastructure.telegram.bot import create_bot, create_dispatcher
 
@@ -24,6 +26,7 @@ class ApplicationContext:
     redis_manager: RedisManager
     bot: Bot
     dispatcher: Dispatcher
+    health_server: HealthHttpServer | None = None
 
 
 @asynccontextmanager
@@ -36,16 +39,18 @@ async def application_lifespan(
 
     Lifecycle stages:
       1. Initialize PostgreSQL connection pool.
-      2. Validate PostgreSQL connectivity ('SELECT 1').
+      2. Validate PostgreSQL connectivity ('SELECT 1') and Alembic migration head (if enabled).
       3. Initialize Redis connection pool.
       4. Validate Redis connectivity ('PING').
       5. Create Telegram Bot client and Dispatcher.
-      6. Yield ApplicationContext to start polling once dependencies are verified healthy.
-      7. On startup failure or shutdown: clean up all initialized resources in reverse order.
+      6. Start optional internal HTTP health server (if HEALTH_SERVER_ENABLED=True).
+      7. Yield ApplicationContext to start polling once dependencies are verified healthy.
+      8. On startup failure or shutdown: clean up all initialized resources in reverse order.
     """
     active_db: DatabaseManager | None = None
     active_redis: RedisManager | None = None
     active_bot: Bot | None = None
+    health_server: HealthHttpServer | None = None
 
     try:
         # Step 1 & 2: PostgreSQL initialization and connectivity verification
@@ -56,6 +61,11 @@ async def application_lifespan(
         logger.info("Verifying PostgreSQL connectivity...")
         await active_db.validate_connection()
         logger.info("PostgreSQL is verified healthy.")
+
+        if settings.effective_require_migrations_current:
+            logger.info("Verifying Alembic database migration readiness...")
+            await assert_database_migrations_current(active_db)
+            logger.info("Database schema matches Alembic head.")
 
         # Step 3 & 4: Redis initialization and connectivity verification
         logger.info("Initializing Redis cache and coordination client...")
@@ -75,12 +85,18 @@ async def application_lifespan(
             redis_manager=active_redis,
         )
 
+        # Step 6: Optional internal HTTP health/readiness endpoint
+        if settings.HEALTH_SERVER_ENABLED:
+            health_server = HealthHttpServer(settings)
+            await health_server.start()
+
         context = ApplicationContext(
             settings=settings,
             db_manager=active_db,
             redis_manager=active_redis,
             bot=active_bot,
             dispatcher=dispatcher,
+            health_server=health_server,
         )
 
         yield context
@@ -88,7 +104,14 @@ async def application_lifespan(
     finally:
         logger.info("Initiating graceful teardown of initialized application resources...")
 
-        # 1. Close Telegram Bot session
+        # 1. Stop internal health server if started
+        if health_server is not None:
+            try:
+                await health_server.stop()
+            except Exception as exc:
+                logger.error("Error stopping internal health server: %s", exc)
+
+        # 2. Close Telegram Bot session
         if active_bot is not None and active_bot.session is not None:
             try:
                 await active_bot.session.close()
@@ -96,7 +119,7 @@ async def application_lifespan(
             except Exception as exc:
                 logger.error("Error closing Telegram bot session: %s", exc)
 
-        # 2. Close Redis client and pool
+        # 3. Close Redis client and pool
         if active_redis is not None:
             try:
                 await active_redis.close()
@@ -104,7 +127,7 @@ async def application_lifespan(
             except Exception as exc:
                 logger.error("Error closing Redis client: %s", exc)
 
-        # 3. Dispose PostgreSQL engine
+        # 4. Dispose PostgreSQL engine
         if active_db is not None:
             try:
                 await active_db.close()

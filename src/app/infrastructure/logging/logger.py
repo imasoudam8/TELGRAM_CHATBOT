@@ -5,6 +5,8 @@ import logging
 import re
 import sys
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 try:
     from datetime import UTC
@@ -25,6 +27,33 @@ SENSITIVE_PATTERNS = [
     # Bearer tokens or secret headers
     re.compile(r"(bearer\s+)[A-Za-z0-9_\-\.]{20,}", re.IGNORECASE),
 ]
+
+_STANDARD_RECORD_KEYS = frozenset(
+    {
+        "name",
+        "msg",
+        "args",
+        "levelname",
+        "levelno",
+        "pathname",
+        "filename",
+        "module",
+        "exc_info",
+        "exc_text",
+        "stack_info",
+        "lineno",
+        "funcName",
+        "created",
+        "msecs",
+        "relativeCreated",
+        "thread",
+        "threadName",
+        "processName",
+        "process",
+        "message",
+        "taskName",
+    }
+)
 
 
 class SensitiveDataFilter(logging.Filter):
@@ -61,6 +90,11 @@ class SensitiveDataFilter(logging.Filter):
                 record.args = {k: self._redact_value(v) for k, v in record.args.items()}
             elif isinstance(record.args, tuple):
                 record.args = tuple(self._redact_value(v) for v in record.args)
+        if isinstance(record.exc_text, str):
+            record.exc_text = self.redact(record.exc_text)
+        extra_keys = set(record.__dict__.keys()) - _STANDARD_RECORD_KEYS
+        for key in extra_keys:
+            record.__dict__[key] = self._redact_value(record.__dict__[key])
         return True
 
     def redact(self, text: str) -> str:
@@ -69,20 +103,16 @@ class SensitiveDataFilter(logging.Filter):
             return text
 
         # 1. Pattern redactions first: known structured patterns take precedence
-        # Telegram Bot Token
         text = SENSITIVE_PATTERNS[0].sub("[REDACTED_BOT_TOKEN]", text)
-        # DB URI password
         text = SENSITIVE_PATTERNS[1].sub(r"://\g<user>:[REDACTED_DB_PASSWORD]@", text)
-        # Redis URI password
         text = SENSITIVE_PATTERNS[2].sub(r"redis://:[REDACTED_REDIS_PASSWORD]@", text)
-        # Bearer token
         text = SENSITIVE_PATTERNS[3].sub(r"\1[REDACTED_BEARER_TOKEN]", text)
 
-        # 2. Exact Telegram bot tokens (ensures registered bot tokens retain [REDACTED_BOT_TOKEN])
+        # 2. Exact Telegram bot tokens
         for token in self._exact_tokens:
             text = text.replace(token, "[REDACTED_BOT_TOKEN]")
 
-        # 3. Exact secrets check for arbitrary credentials not matching known patterns
+        # 3. Exact secrets check for arbitrary credentials
         for secret in self._exact_secrets:
             text = text.replace(secret, "[REDACTED]")
 
@@ -91,49 +121,36 @@ class SensitiveDataFilter(logging.Filter):
     def _redact_value(self, value: Any) -> Any:
         if isinstance(value, str):
             return self.redact(value)
+        if isinstance(value, dict):
+            return {k: self._redact_value(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._redact_value(v) for v in value]
         return value
 
 
 class StructuredJsonFormatter(logging.Formatter):
     """JSON log formatter compliant with structured logging and observability systems."""
 
+    def __init__(self, scrubber: SensitiveDataFilter | None = None) -> None:
+        super().__init__()
+        self._scrubber = scrubber or SensitiveDataFilter()
+
     def format(self, record: logging.LogRecord) -> str:
         log_entry: dict[str, Any] = {
             "timestamp": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": self._scrubber.redact(record.getMessage()),
         }
 
         if record.exc_info:
-            log_entry["exception"] = self.formatException(record.exc_info)
+            log_entry["exception"] = self._scrubber.redact(self.formatException(record.exc_info))
 
-        # Include additional attributes attached via extra={...}
-        extra_keys = set(record.__dict__.keys()) - {
-            "name",
-            "msg",
-            "args",
-            "levelname",
-            "levelno",
-            "pathname",
-            "filename",
-            "module",
-            "exc_info",
-            "exc_text",
-            "stack_info",
-            "lineno",
-            "funcName",
-            "created",
-            "msecs",
-            "relativeCreated",
-            "thread",
-            "threadName",
-            "processName",
-            "process",
-            "message",
-        }
+        extra_keys = set(record.__dict__.keys()) - _STANDARD_RECORD_KEYS
         if extra_keys:
-            log_entry["extra"] = {k: getattr(record, k) for k in extra_keys}
+            log_entry["extra"] = {
+                k: self._scrubber._redact_value(getattr(record, k)) for k in sorted(extra_keys)
+            }
 
         return json.dumps(log_entry, ensure_ascii=False)
 
@@ -141,45 +158,68 @@ class StructuredJsonFormatter(logging.Formatter):
 class ConsoleFormatter(logging.Formatter):
     """Human-readable console log formatter for local development."""
 
+    def __init__(self, scrubber: SensitiveDataFilter | None = None) -> None:
+        super().__init__()
+        self._scrubber = scrubber or SensitiveDataFilter()
+
     def format(self, record: logging.LogRecord) -> str:
         timestamp = datetime.fromtimestamp(record.created, tz=UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-        msg = record.getMessage()
+        msg = self._scrubber.redact(record.getMessage())
         formatted = f"{timestamp} [{record.levelname:<8}] {record.name}: {msg}"
         if record.exc_info:
-            formatted += f"\n{self.formatException(record.exc_info)}"
+            exc_rendered = self._scrubber.redact(self.formatException(record.exc_info))
+            formatted += f"\n{exc_rendered}"
         return formatted
 
 
-def configure_logging(settings: Settings) -> None:
-    """Configure structured logging with appropriate formatters, handlers, and redaction filters."""
-    root_logger = logging.getLogger()
-    root_logger.handlers.clear()
-
-    level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
-    root_logger.setLevel(level)
-
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(level)
-
-    # Gather known secrets from settings for exact redaction
+def _collect_known_secrets(settings: Settings) -> list[str]:
     known_secrets = [
         settings.BOT_TOKEN.get_secret_value(),
         settings.POSTGRES_PASSWORD.get_secret_value(),
     ]
     if settings.REDIS_PASSWORD:
         known_secrets.append(settings.REDIS_PASSWORD.get_secret_value())
+    return known_secrets
 
-    sensitive_filter = SensitiveDataFilter(additional_secrets=known_secrets)
-    handler.addFilter(sensitive_filter)
 
-    if settings.LOG_FORMAT.lower() == "json":
-        handler.setFormatter(StructuredJsonFormatter())
-    else:
-        handler.setFormatter(ConsoleFormatter())
+def configure_logging(settings: Settings) -> None:
+    """Configure structured logging with redaction filters and optional log file rotation."""
+    root_logger = logging.getLogger()
+    for existing_handler in list(root_logger.handlers):
+        existing_handler.close()
+    root_logger.handlers.clear()
 
-    root_logger.addHandler(handler)
+    level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
+    root_logger.setLevel(level)
 
-    # Silence excessively noisy loggers if at INFO
+    sensitive_filter = SensitiveDataFilter(additional_secrets=_collect_known_secrets(settings))
+    formatter: logging.Formatter = (
+        StructuredJsonFormatter(scrubber=sensitive_filter)
+        if settings.LOG_FORMAT.lower() == "json"
+        else ConsoleFormatter(scrubber=sensitive_filter)
+    )
+
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setLevel(level)
+    stdout_handler.addFilter(sensitive_filter)
+    stdout_handler.setFormatter(formatter)
+    root_logger.addHandler(stdout_handler)
+
+    if settings.LOG_FILE_PATH:
+        log_path = Path(settings.LOG_FILE_PATH)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            filename=str(log_path),
+            maxBytes=settings.LOG_MAX_BYTES,
+            backupCount=settings.LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(level)
+        file_handler.addFilter(sensitive_filter)
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+
+    # Silence excessively noisy third-party loggers at INFO
     if level == logging.INFO:
         logging.getLogger("aiogram.event").setLevel(logging.WARNING)
         logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
