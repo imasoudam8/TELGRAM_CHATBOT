@@ -9,7 +9,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.app.config.settings import Settings
-from src.app.infrastructure.backup import prune_backup_retention, verify_backup_file
+from src.app.infrastructure.backup import (
+    assert_pg_tools_compatible,
+    parse_pg_tool_major_version,
+    prune_backup_retention,
+    verify_backup_file,
+)
 from src.app.infrastructure.database.session import DatabaseManager
 from src.app.infrastructure.health_server import HealthHttpServer
 from src.app.infrastructure.lifecycle import application_lifespan
@@ -174,6 +179,12 @@ def test_docker_compose_ci_and_secret_hygiene() -> None:
     assert "USER appuser" in dockerfile
     assert "STOPSIGNAL SIGTERM" in dockerfile
     assert "HEALTHCHECK" in dockerfile
+    assert "postgresql-client-16" in dockerfile
+    assert "gnupg" in dockerfile
+
+    ci_yml = (PROJECT_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "postgresql-client-16" in ci_yml
+    assert "Verify PostgreSQL 16 Client Tool Compatibility" in ci_yml
 
     dockerignore = (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8")
     assert ".env" in dockerignore
@@ -209,3 +220,31 @@ def test_docker_compose_ci_and_secret_hygiene() -> None:
                 assert any(marker in match.upper() for marker in ("EXAMPLE", "TEST", "CI_TEST")), (
                     f"Suspicious non-test bot token literal found in {file_path}"
                 )
+
+
+def test_pg_client_version_parsing_and_compatibility_guard(test_settings: Settings) -> None:
+    """Verify pg_dump/pg_restore major version parser and client > server rejection."""
+    assert parse_pg_tool_major_version("pg_dump (PostgreSQL) 16.16 (Debian 16.16-1.pgdg12+1)") == 16
+    assert (
+        parse_pg_tool_major_version("pg_restore (PostgreSQL) 17.2 (Ubuntu 17.2-1.pgdg24.04+1)")
+        == 17
+    )
+    with pytest.raises(ValueError, match="Could not parse"):
+        parse_pg_tool_major_version("unknown binary output")
+
+    with (
+        patch("src.app.infrastructure.backup.get_pg_server_major_version", return_value=16),
+        patch(
+            "src.app.infrastructure.backup.get_pg_tool_major_version",
+            side_effect=lambda tool: 17 if tool == "pg_dump" else 16,
+        ),
+        pytest.raises(RuntimeError, match="transaction_timeout"),
+    ):
+        assert_pg_tools_compatible(test_settings, tools=("pg_dump", "pg_restore"))
+
+    with (
+        patch("src.app.infrastructure.backup.get_pg_server_major_version", return_value=16),
+        patch("src.app.infrastructure.backup.get_pg_tool_major_version", return_value=16),
+    ):
+        versions = assert_pg_tools_compatible(test_settings, tools=("pg_dump", "pg_restore"))
+        assert versions == {"server": 16, "pg_dump": 16, "pg_restore": 16}

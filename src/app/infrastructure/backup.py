@@ -20,7 +20,9 @@ from src.app.infrastructure.logging.logger import SensitiveDataFilter
 
 logger = logging.getLogger(__name__)
 
+SUPPORTED_POSTGRES_MAJOR = 16
 BACKUP_FILENAME_RE = re.compile(r"^(?P<db>[A-Za-z0-9_.-]+)_(?P<ts>\d{8}T\d{6}Z)\.dump(?:\.gpg)?$")
+PG_VERSION_RE = re.compile(r"\b(\d+)(?:\.\d+)*\b")
 
 
 @dataclass(frozen=True)
@@ -141,6 +143,98 @@ def _run_subprocess(
     return result
 
 
+def parse_pg_tool_major_version(version_output: str) -> int:
+    """Extract the PostgreSQL major version integer from '--version' CLI output."""
+    text = version_output.strip()
+    match = re.search(r"\(PostgreSQL\)\s+(\d+)", text)
+    if match:
+        return int(match.group(1))
+    fallback = PG_VERSION_RE.search(text)
+    if fallback:
+        return int(fallback.group(1))
+    raise ValueError(f"Could not parse PostgreSQL tool major version from: {text!r}")
+
+
+def get_pg_tool_major_version(tool_name: str) -> int:
+    """Return the installed major version for pg_dump, pg_restore, or psql."""
+    if shutil.which(tool_name) is None:
+        raise RuntimeError(f"'{tool_name}' binary is not installed in PATH.")
+    res = subprocess.run(
+        [tool_name, "--version"],
+        capture_output=True,
+        text=True,
+        timeout=10.0,
+        check=False,
+    )
+    if res.returncode != 0:
+        raise RuntimeError(f"Failed to query '{tool_name} --version': {res.stderr.strip()}")
+    return parse_pg_tool_major_version(res.stdout or res.stderr)
+
+
+def get_pg_server_major_version(
+    settings: Settings,
+    *,
+    database: str | None = None,
+    scrubber: SensitiveDataFilter | None = None,
+) -> int:
+    """Query the target PostgreSQL server major version via server_version_num."""
+    if shutil.which("psql") is None:
+        raise RuntimeError("'psql' binary is not installed in PATH.")
+    active_scrubber = scrubber or _make_scrubber(settings)
+    target_db = database or settings.POSTGRES_DB
+    res = _run_subprocess(
+        [
+            "psql",
+            "--host",
+            settings.POSTGRES_HOST,
+            "--port",
+            str(settings.POSTGRES_PORT),
+            "--username",
+            settings.POSTGRES_USER,
+            "--dbname",
+            target_db,
+            "-At",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-c",
+            "SHOW server_version_num;",
+        ],
+        env=_pg_env(settings),
+        scrubber=active_scrubber,
+    )
+    raw_num = res.stdout.strip().splitlines()[-1].strip()
+    if not raw_num.isdigit():
+        raise RuntimeError(f"Unexpected PostgreSQL server_version_num output: {raw_num!r}")
+    return int(raw_num) // 10000
+
+
+def assert_pg_tools_compatible(
+    settings: Settings,
+    *,
+    tools: tuple[str, ...] = ("pg_dump", "pg_restore"),
+    database: str | None = None,
+    scrubber: SensitiveDataFilter | None = None,
+) -> dict[str, int]:
+    """Verify PostgreSQL client tools are compatible with the target PostgreSQL server."""
+    server_major = get_pg_server_major_version(
+        settings,
+        database=database,
+        scrubber=scrubber,
+    )
+    versions: dict[str, int] = {"server": server_major}
+    for tool in tools:
+        client_major = get_pg_tool_major_version(tool)
+        versions[tool] = client_major
+        if client_major > server_major:
+            raise RuntimeError(
+                f"PostgreSQL client compatibility error: '{tool}' major version {client_major} "
+                f"is newer than target PostgreSQL server major version {server_major} "
+                "(which causes incompatible SQL such as 'SET transaction_timeout = 0;'). "
+                f"Install PostgreSQL {server_major} client utilities."
+            )
+    return versions
+
+
 def encrypt_file_gpg(
     source_path: Path,
     *,
@@ -179,22 +273,26 @@ def encrypt_file_gpg(
         _run_subprocess(cmd, scrubber=active_scrubber)
     else:
         assert resolved_pass is not None
-        cmd = [
-            "gpg",
-            "--batch",
-            "--yes",
-            "--pinentry-mode",
-            "loopback",
-            "--passphrase-fd",
-            "0",
-            "--symmetric",
-            "--cipher-algo",
-            "AES256",
-            "--output",
-            str(encrypted_path),
-            str(source_path),
-        ]
-        _run_subprocess(cmd, stdin_text=f"{resolved_pass}\n", scrubber=active_scrubber)
+        with tempfile.TemporaryDirectory(prefix="gpg_home_") as gpg_home:
+            os.chmod(gpg_home, 0o700)
+            cmd = [
+                "gpg",
+                "--homedir",
+                gpg_home,
+                "--batch",
+                "--yes",
+                "--pinentry-mode",
+                "loopback",
+                "--passphrase-fd",
+                "0",
+                "--symmetric",
+                "--cipher-algo",
+                "AES256",
+                "--output",
+                str(encrypted_path),
+                str(source_path),
+            ]
+            _run_subprocess(cmd, stdin_text=f"{resolved_pass}\n", scrubber=active_scrubber)
 
     if not encrypted_path.exists() or encrypted_path.stat().st_size == 0:
         raise RuntimeError("GPG encryption produced an empty or missing output file.")
@@ -219,21 +317,37 @@ def decrypt_file_gpg(
         additional_secrets=[resolved_pass] if resolved_pass else None
     )
 
-    cmd = [
-        "gpg",
-        "--batch",
-        "--yes",
-        "--decrypt",
-        "--output",
-        str(output_path),
-    ]
-    stdin_text: str | None = None
     if resolved_pass is not None:
-        cmd.extend(["--pinentry-mode", "loopback", "--passphrase-fd", "0"])
-        stdin_text = f"{resolved_pass}\n"
-    cmd.append(str(encrypted_path))
+        with tempfile.TemporaryDirectory(prefix="gpg_home_") as gpg_home:
+            os.chmod(gpg_home, 0o700)
+            cmd = [
+                "gpg",
+                "--homedir",
+                gpg_home,
+                "--batch",
+                "--yes",
+                "--pinentry-mode",
+                "loopback",
+                "--passphrase-fd",
+                "0",
+                "--decrypt",
+                "--output",
+                str(output_path),
+                str(encrypted_path),
+            ]
+            _run_subprocess(cmd, stdin_text=f"{resolved_pass}\n", scrubber=active_scrubber)
+    else:
+        cmd = [
+            "gpg",
+            "--batch",
+            "--yes",
+            "--decrypt",
+            "--output",
+            str(output_path),
+            str(encrypted_path),
+        ]
+        _run_subprocess(cmd, scrubber=active_scrubber)
 
-    _run_subprocess(cmd, stdin_text=stdin_text, scrubber=active_scrubber)
     if not output_path.exists() or output_path.stat().st_size == 0:
         raise RuntimeError("Decrypted backup output file is empty or missing.")
     os.chmod(output_path, 0o600)
@@ -455,6 +569,13 @@ def create_postgres_backup(
     resolved_pass = _read_passphrase(gpg_passphrase, gpg_passphrase_file)
     scrubber = _make_scrubber(settings, [resolved_pass] if resolved_pass else None)
 
+    assert_pg_tools_compatible(
+        settings,
+        tools=("pg_dump", "pg_restore"),
+        database=settings.POSTGRES_DB,
+        scrubber=scrubber,
+    )
+
     timestamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
     raw_dump_path = backup_dir / f"{settings.POSTGRES_DB}_{timestamp}.dump"
 
@@ -482,15 +603,17 @@ def create_postgres_backup(
     final_path = raw_dump_path
     encrypted = False
     if gpg_recipient or resolved_pass:
-        encrypted_path = encrypt_file_gpg(
-            raw_dump_path,
-            recipient=gpg_recipient,
-            passphrase=resolved_pass,
-            scrubber=scrubber,
-        )
-        raw_dump_path.unlink(missing_ok=True)
-        final_path = encrypted_path
-        encrypted = True
+        try:
+            encrypted_path = encrypt_file_gpg(
+                raw_dump_path,
+                recipient=gpg_recipient,
+                passphrase=resolved_pass,
+                scrubber=scrubber,
+            )
+            final_path = encrypted_path
+            encrypted = True
+        finally:
+            raw_dump_path.unlink(missing_ok=True)
 
     checksum_path, sha256 = _write_sha256_sidecar(final_path)
     verification = verify_backup_file(
@@ -563,6 +686,13 @@ def restore_and_verify_backup(
 
     resolved_pass = _read_passphrase(passphrase, passphrase_file)
     scrubber = _make_scrubber(settings, [resolved_pass] if resolved_pass else None)
+
+    assert_pg_tools_compatible(
+        settings,
+        tools=("pg_restore",),
+        database="postgres" if create_target_db else target_db,
+        scrubber=scrubber,
+    )
 
     verification = verify_backup_file(
         backup_path,

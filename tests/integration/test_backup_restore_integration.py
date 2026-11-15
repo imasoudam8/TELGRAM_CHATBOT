@@ -14,7 +14,10 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from src.app.config.settings import Settings
 from src.app.infrastructure.backup import (
+    SUPPORTED_POSTGRES_MAJOR,
+    assert_pg_tools_compatible,
     create_postgres_backup,
+    get_pg_tool_major_version,
     restore_and_verify_backup,
     verify_backup_file,
 )
@@ -105,6 +108,13 @@ async def test_live_postgres_backup_gpg_corruption_detection_and_restore_drill(
         pytest.fail("gpg binary is required for encrypted backup integration")
 
     _, settings = migrated_postgres_db
+
+    assert get_pg_tool_major_version("pg_dump") == SUPPORTED_POSTGRES_MAJOR
+    assert get_pg_tool_major_version("pg_restore") == SUPPORTED_POSTGRES_MAJOR
+    assert get_pg_tool_major_version("psql") == SUPPORTED_POSTGRES_MAJOR
+    versions = assert_pg_tools_compatible(settings, tools=("pg_dump", "pg_restore"))
+    assert versions == {"server": 16, "pg_dump": 16, "pg_restore": 16}
+
     db = DatabaseManager(settings)
     await db.initialize()
     try:

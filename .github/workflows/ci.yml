@@ -71,7 +71,24 @@ jobs:
       - name: Install PostgreSQL 16 Client Tools for Backup/Restore Validation
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends postgresql-client gnupg
+          sudo apt-get install -y --no-install-recommends curl ca-certificates gnupg lsb-release
+          sudo install -d -m 0755 /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor --yes -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client-16
+          echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
+
+      - name: Verify PostgreSQL 16 Client Tool Compatibility
+        run: |
+          pg_dump --version
+          pg_restore --version
+          psql --version
+          pg_dump --version | grep -qE '\(PostgreSQL\) 16\.'
+          pg_restore --version | grep -qE '\(PostgreSQL\) 16\.'
+          psql --version | grep -qE '\(PostgreSQL\) 16\.'
 
       - name: Install Dependencies
         run: |
@@ -130,10 +147,18 @@ jobs:
         run: |
           docker build -t telegram-matching-bot:ci .
 
-      - name: Verify Non-Root Runtime User
+      - name: Verify Non-Root Runtime User and Operational Tooling (PG 16 + GPG)
         run: |
           uid="$(docker run --rm --entrypoint id telegram-matching-bot:ci -u)"
           test "$uid" = "10001"
+          docker run --rm --entrypoint sh telegram-matching-bot:ci -eu -c '
+            pg_dump --version | grep -qE "\(PostgreSQL\) 16\."
+            pg_restore --version | grep -qE "\(PostgreSQL\) 16\."
+            psql --version | grep -qE "\(PostgreSQL\) 16\."
+            gpg --version >/dev/null
+            ./scripts/backup_postgres.py --help >/dev/null
+            ./scripts/restore_postgres.py --help >/dev/null
+          '
 
       - name: Validate Container Migration, Healthcheck & Production Secret Guard
         run: |

@@ -76,12 +76,16 @@ jobs:
           rm -f image.tar.gz
 
           # Ensure PostgreSQL and Redis are healthy before backup/migration
-          docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d postgres redis
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --wait postgres redis
 
-          # Pre-deploy database backup (never ignore backup failure)
-          if [ -x "./scripts/backup_postgres.py" ]; then
-            ./scripts/backup_postgres.py --backup-dir "${DEPLOY_PATH}/backups"
-          fi
+          # Pre-deploy database backup via container PG16 tools over internal network (never ignore failure)
+          install -d -m 700 "${DEPLOY_PATH}/backups"
+          BOT_IMAGE="telegram-matching-bot:${NEW_TAG}" \
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm --no-deps \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -v "${DEPLOY_PATH}/backups:/tmp/predeploy_backups" \
+            --entrypoint python bot scripts/backup_postgres.py --backup-dir /tmp/predeploy_backups
 
           # Forward-only Alembic migration (never destructive downgrade)
           BOT_IMAGE="telegram-matching-bot:${NEW_TAG}" \
