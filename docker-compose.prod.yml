@@ -38,8 +38,6 @@ services:
       - /tmp
     cap_drop:
       - ALL
-    security_opt:
-      - no-new-privileges:true
     environment:
       APP_ENV: production
       BOT_TOKEN: ${BOT_TOKEN:?BOT_TOKEN must be set in production}

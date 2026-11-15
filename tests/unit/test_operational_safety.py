@@ -203,6 +203,7 @@ def test_docker_compose_ci_and_secret_hygiene() -> None:
     assert "${POSTGRES_PASSWORD:?" in compose_prod
     assert "${REDIS_PASSWORD:?" in compose_prod
     assert "read_only: true" in compose_prod
+    assert "security_opt:" not in compose_prod
     assert "--check-migrations" in compose_prod
 
     deploy_yml = (PROJECT_ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
