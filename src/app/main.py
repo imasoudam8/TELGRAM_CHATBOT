@@ -5,6 +5,7 @@ import contextlib
 import signal
 import sys
 
+from aiogram.exceptions import TelegramUnauthorizedError
 from pydantic import ValidationError
 from redis.exceptions import RedisError
 from sqlalchemy.exc import SQLAlchemyError
@@ -12,6 +13,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from src.app.config.settings import get_settings
 from src.app.infrastructure.lifecycle import application_lifespan
 from src.app.infrastructure.logging.logger import configure_logging, get_logger
+from src.app.infrastructure.telegram.polling_lock import (
+    PollingConflictError,
+    TelegramPollingLock,
+    extract_bot_id_from_token,
+)
 
 logger = get_logger("src.app.main")
 
@@ -40,46 +46,69 @@ async def run_app() -> None:
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, _on_signal, sig.name)
 
-    # Steps 3 through 8: Initialize Postgres, verify migrations, initialize Redis, start polling
+    # Steps 3 through 8: Initialize Postgres, verify migrations, initialize Redis, lock & poll
     try:
         async with application_lifespan(settings) as ctx:
-            logger.info("All dependencies healthy. Starting Telegram long polling...")
-            polling_task = asyncio.create_task(
-                ctx.dispatcher.start_polling(
-                    ctx.bot,
-                    allowed_updates=ctx.dispatcher.resolve_used_update_types(),
-                    close_bot_session=False,
-                    handle_signals=False,
-                ),
-                name="telegram-polling",
-            )
-            stop_waiter = asyncio.create_task(shutdown_event.wait(), name="shutdown-waiter")
+            bot_id = extract_bot_id_from_token(settings.BOT_TOKEN.get_secret_value())
+            polling_lock = TelegramPollingLock(ctx.redis_manager.client, bot_id=bot_id)
+            await polling_lock.acquire()
 
-            done, _ = await asyncio.wait(
-                {polling_task, stop_waiter},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            try:
+                logger.info("All dependencies healthy. Starting Telegram long polling...")
+                polling_lock.start_renewal(shutdown_event.set)
+                polling_task = asyncio.create_task(
+                    ctx.dispatcher.start_polling(
+                        ctx.bot,
+                        allowed_updates=ctx.dispatcher.resolve_used_update_types(),
+                        close_bot_session=False,
+                        handle_signals=False,
+                        tasks_shutdown_timeout=10.0,
+                    ),
+                    name="telegram-polling",
+                )
+                stop_waiter = asyncio.create_task(shutdown_event.wait(), name="shutdown-waiter")
 
-            if stop_waiter in done and not polling_task.done():
-                logger.info("Stopping Telegram dispatcher polling...")
-                with contextlib.suppress(RuntimeError):
-                    await ctx.dispatcher.stop_polling()
-                try:
-                    await asyncio.wait_for(polling_task, timeout=15.0)
-                except TimeoutError:
-                    logger.warning("Polling task did not finish within 15s; cancelling.")
-                    polling_task.cancel()
+                done, _ = await asyncio.wait(
+                    {polling_task, stop_waiter},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                if stop_waiter in done and not polling_task.done():
+                    logger.info("Stopping Telegram dispatcher polling...")
+                    with contextlib.suppress(RuntimeError):
+                        await ctx.dispatcher.stop_polling()
+                    try:
+                        await asyncio.wait_for(polling_task, timeout=15.0)
+                    except TimeoutError:
+                        logger.warning("Polling task did not finish within 15s; cancelling.")
+                        polling_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await polling_task
+                else:
+                    stop_waiter.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
-                        await polling_task
-            else:
-                stop_waiter.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await stop_waiter
-                # Re-raise polling exception if polling failed unexpectedly
-                polling_task.result()
+                        await stop_waiter
+                    # Re-raise polling exception if polling failed unexpectedly
+                    polling_task.result()
+            finally:
+                await polling_lock.release()
 
     except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
         logger.info("Application shutdown completed.")
+    except PollingConflictError as exc:
+        logger.critical(
+            "Polling lock conflict: %s",
+            exc,
+            extra={"error_category": "polling_conflict"},
+        )
+        sys.exit(2)
+    except TelegramUnauthorizedError as exc:
+        logger.critical(
+            "Telegram Bot API authentication failure: %s",
+            exc,
+            extra={"error_category": "telegram_auth"},
+        )
+        sys.exit(1)
     except (OSError, TimeoutError, SQLAlchemyError, RedisError, RuntimeError) as exc:
         logger.critical(
             "Infrastructure or startup readiness failure: %s",

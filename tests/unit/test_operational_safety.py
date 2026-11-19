@@ -278,3 +278,27 @@ def test_staging_isolation_compose_and_template_hygiene() -> None:
     uat_doc = (PROJECT_ROOT / "docs/operations/staging-uat-runbook.md").read_text(encoding="utf-8")
     assert "NOT_EXECUTED" in uat_doc
     assert "Go / No-Go" in uat_doc
+    for scenario_heading in (
+        "Scenario 1: New User Registration",
+        "Scenario 2: Profile Creation and Editing",
+        "Scenario 3: Profile Discovery and Filters",
+        "Scenario 4: Random Matching",
+        "Scenario 5: Direct Chat Request",
+        "Scenario 6: Accepting and Rejecting Requests",
+        "Scenario 7: Chat Messaging",
+        "Scenario 8: Text and Supported Media Exchange",
+        "Scenario 9: Blocking and Reporting",
+        "Scenario 10: Connection History",
+        "Scenario 11: Wallet and Chat Coins Behavior",
+        "Scenario 12: Admin Permissions and Moderation",
+        "Scenario 13: Bot Restart and User Recovery",
+        "Scenario 14: Privacy and Identity Protection",
+    ):
+        assert scenario_heading in uat_doc
+    assert "Graceful Shutdown & Restart Persistence Procedure" in uat_doc
+    assert "Safe Staging Update Procedure" in uat_doc
+    assert "Common Startup Failure Troubleshooting" in uat_doc
+
+    main_py = (PROJECT_ROOT / "src/app/main.py").read_text(encoding="utf-8")
+    assert "TelegramPollingLock" in main_py
+    assert "tasks_shutdown_timeout" in main_py

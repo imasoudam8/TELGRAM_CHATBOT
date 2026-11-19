@@ -48,6 +48,8 @@ services:
     environment:
       APP_ENV: staging
       APP_NAME: ${APP_NAME:-Anonymous Telegram Matching & Chat Bot [Staging]}
+      TIMEZONE: ${TIMEZONE:-Asia/Tehran}
+      DAILY_FREE_COINS_QUOTA: ${DAILY_FREE_COINS_QUOTA:-4}
       BOT_TOKEN: ${BOT_TOKEN:?BOT_TOKEN must be set in staging}
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set in staging}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in staging}
