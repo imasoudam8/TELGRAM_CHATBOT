@@ -16,6 +16,7 @@ Operators and release reviewers MUST keep these states strictly separate:
 | `STAGING_CONFIG_VERIFIED` | Validated structurally (`Settings`, Compose config, healthcheck CLI, polling lock, secret guards) with synthetic non-prod inputs. |
 | `NOT_EXECUTED` | Human manual Telegram test case not yet executed on a live staging bot. |
 | `BLOCKED` | Cannot execute until prerequisites (VPS host, dedicated staging `@BotFather` token, two independent Telegram test accounts) are provisioned. |
+| `BLOCKED / POLICY UNRESOLVED` | Product/business policy is intentionally undecided; cannot be marked `PASS` until the project owner explicitly decides the policy. |
 | `PASS` / `FAIL` | Executed by human operators on real Telegram accounts with observed evidence recorded in **Actual result**. |
 
 ---
@@ -313,16 +314,19 @@ docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.s
 
 ### Scenario 8: Text and Supported Media Exchange
 - **Automated Baseline:** `AUTOMATED_PASSED`
-- **Preconditions:** Active anonymous chat between Account A and Account B; staging container `/tmp` initially clean (`find /tmp -maxdepth 2`).
+- **Preconditions:** Active anonymous chat between Account A and Account B; staging container `/tmp` initially clean (`find /tmp -maxdepth 2`). Supported media types defined for the project are **text**, **photo**, **video** (strictly `< 10 MiB` / `10,485,760` bytes), **voice** messages, **audio** files, and **documents/files** (plus stickers/GIFs where enabled).
 - **Actions for Account A:**
-  1. Send supported media: a **photo**, a **voice note**, a **video (< 10 MiB)**, a **sticker**, and a **GIF/animation**.
-  2. Attempt sending disallowed/oversized media: a **video >= 10 MiB** (or verify boundary), an **audio file (MP3)**, and a **document (PDF/ZIP)**.
-  3. End chat after verification using `❌ پایان گفتگو` (or `/end`).
+  1. Send **text** messages cleanly (see Scenario 7 for special HTML escaping).
+  2. Send **photos and videos**: send a **photo** and a **video strictly `< 10 MiB`** (`< 10,485,760` bytes).
+  3. Send a **voice message** (Telegram voice note) separately from an **audio file** (e.g., an `.mp3` audio file) to verify both voice notes and audio files distinctly.
+  4. Send a **document/file** (e.g., a `.pdf` or `.zip` file `< 10 MiB`) cleanly as a document attachment.
+  5. Verify the strict video size limit by attempting to send a **video `>= 10 MiB`** (`>= 10,485,760` bytes).
+  6. End chat after verification using `❌ پایان گفتگو` (or `/end`).
 - **Actions for Account B:**
-  1. Verify all 5 supported media types arrive and play cleanly via relayed Telegram `file_id`.
-  2. Confirm none of the rejected media (oversized video, MP3 audio, PDF/ZIP document) reach Account B.
+  1. Verify each supported category arrives cleanly on Account B via Telegram `file_id` relay without sender attribution: **text**, **photo**, **video (`< 10 MiB`)**, **voice message**, **audio file (MP3)**, and **document/file (PDF/ZIP)**.
+  2. Confirm the oversized **video (`>= 10 MiB`)** does **not** reach Account B.
   3. Confirm end-of-chat notification returns Account B to the Persian main menu keyboard.
-- **Expected result:** All 5 supported media types relay seamlessly via Telegram `file_id`; `>= 10 MiB` video and unsupported types (`audio`, `document`) are rejected with clear Persian warnings and never forwarded; host/container check (`find /tmp -maxdepth 2`) confirms zero media files stored permanently on server disk.
+- **Expected result:** Text, photos, videos (`< 10 MiB` / `10,485,760` bytes), voice messages, audio files (MP3), and documents/files (PDF/ZIP) relay seamlessly via Telegram `file_id` with full identity anonymity; videos `>= 10 MiB` (`>= 10,485,760` bytes) are strictly rejected with a Persian size-limit warning and never forwarded; host/container check (`find /tmp -maxdepth 2`) confirms zero media files are permanently downloaded or retained on server disk. *(If any supported media category such as audio files or documents is rejected by the deployed build, record the exact bot reply in **Actual result** and file a defect—do not treat MP3 audio or PDF/ZIP documents as expected-unsupported.)*
 - **Actual result:** *(fill during live UAT)*
 - **Status:** `NOT_EXECUTED` — `[ ] PASS  [ ] FAIL  [ ] BLOCKED`
 
@@ -360,20 +364,28 @@ docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.s
 ---
 
 ### Scenario 11: Wallet and Chat Coins Behavior
-> **Product Rule Constraint:** Preserve the documented deferred-settlement behavior when a participant has insufficient coins: active chat stays open, `ChatSession.is_charged` remains `False`, and zero debits occur (never force negative balances or alter policy during staging UAT).
+> **Unresolved Policy Notice — `BLOCKED / POLICY UNRESOLVED`:** The **insufficient-balance settlement policy** is intentionally **UNRESOLVED**. Neither this runbook nor any UAT task is authorized to decide implementation behavior or business policy when a user has insufficient Chat Coins (e.g., whether chat must remain open or close, whether debt is recorded, whether negative balance applies, or whether any automatic fallback/compensation applies). During UAT, **never** mark the insufficient-balance settlement rule as `PASS`; it remains `BLOCKED / POLICY UNRESOLVED` until the project owner explicitly defines and approves the policy.
 
-- **Automated Baseline:** `AUTOMATED_PASSED`
+- **Automated Baseline:** `AUTOMATED_PASSED` *(covers sufficient-balance daily free allocation, idempotent ledger accounting, and settlement rules for two-sided vs. single-sided chats)*
 - **Preconditions:** Account A and Account B have unblocked access to chat; observe starting balances via `🪙 کیف پول`.
 - **Actions for Account A:**
-  1. Tap `🪙 کیف پول`, note daily free quota (`DAILY_FREE_COINS_QUOTA=4`), expiry time (Tehran midnight), purchased coins, and tap `🔄 بروزرسانی موجودی` twice (confirm no double allocation).
-  2. Complete a two-sided `RANDOM` chat with Account B (both send >= 1 message), then inspect `🪙 کیف پول` -> `📜 تاریخچه تراکنش‌ها`.
-  3. Initiate and complete a two-sided `DIRECT` chat with Account B (Account A = requester), then inspect `📜 تاریخچه تراکنش‌ها`.
-  4. Also perform one single-sided chat (Account A sends, Account B sends 0 messages, then ends chat) and check balances.
+  1. **Scenario 11a (Sufficient-Balance & Daily Quota Accounting):**
+     - Tap `🪙 کیف پول`, note daily free quota (`DAILY_FREE_COINS_QUOTA=4`), expiry time (Tehran midnight), purchased coins, and tap `🔄 بروزرسانی موجودی` twice (confirm no double allocation).
+     - With sufficient coins, complete a two-sided `RANDOM` chat with Account B (both send >= 1 message), then inspect `🪙 کیف پول` -> `📜 تاریخچه تراکنش‌ها`.
+     - With sufficient coins, initiate and complete a two-sided `DIRECT` chat with Account B (Account A = requester), then inspect `📜 تاریخچه تراکنش‌ها`.
+     - Perform one single-sided chat (Account A sends, Account B sends 0 messages, then ends chat) and check balances.
+  2. **Scenario 11b (Insufficient-Balance Settlement Behavior — `BLOCKED / POLICY UNRESOLVED`):**
+     - Observe only (without asserting or approving product correctness) what currently happens if a participant with insufficient coins attempts or participates in a chat; record raw observations only.
 - **Actions for Account B:**
-  1. Tap `🪙 کیف پول` -> `📜 تاریخچه تراکنش‌ها` before and after both the `RANDOM` and `DIRECT` chats.
-- **Expected result:** `DAILY_FREE_COINS_QUOTA` allocates at most once per Tehran business date; two-sided `RANDOM` chat debits 1 coin each atomically; two-sided `DIRECT` chat debits 2 coins from requester (Account A) only and 0 from recipient (Account B); single-sided chat charges 0; balances never become negative and zero-balance users do not trigger negative balances.
-- **Actual result:** *(fill during live UAT)*
-- **Status:** `NOT_EXECUTED` — `[ ] PASS  [ ] FAIL  [ ] BLOCKED`
+  1. Tap `🪙 کیف پول` -> `📜 تاریخچه تراکنش‌ها` before and after the `RANDOM`, `DIRECT`, and single-sided chats in **11a**.
+  2. Record raw observed behavior (if executed) for **11b** without passing the policy rule.
+- **Expected result:**
+  - **11a (Sufficient-balance & daily quota flows):** `DAILY_FREE_COINS_QUOTA` allocates at most once per Tehran business date; two-sided `RANDOM` chat debits 1 coin each atomically; two-sided `DIRECT` chat debits 2 coins from requester (Account A) only and 0 from recipient (Account B); single-sided chat charges 0.
+  - **11b (Insufficient-balance settlement behavior):** **`BLOCKED / POLICY UNRESOLVED`** — Expected business behavior is intentionally unspecified pending an explicit project-owner decision (no rule is prescribed for keeping chat open vs. closing chat, recording debt, negative balance, or automatic fallback/compensation).
+- **Actual result (11a):** *(fill during live UAT)*
+- **Actual result (11b — raw observation only):** *(fill during live UAT)*
+- **Status (11a — Sufficient-balance & quota flows):** `NOT_EXECUTED` — `[ ] PASS  [ ] FAIL  [ ] BLOCKED`
+- **Status (11b — Insufficient-balance settlement policy):** `BLOCKED / POLICY UNRESOLVED` *(cannot be marked `PASS` until project owner explicitly decides the policy)*
 
 ---
 
@@ -469,9 +481,9 @@ docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.s
 1. All automated CI checks (`ruff`, `compileall`, PostgreSQL 16 + Redis 7 integration & randomized tests, Compose config validation) pass on the exact commit SHA deployed to staging.
 2. All 14 UAT scenarios executed on two independent real Telegram accounts with **zero** open Critical or High severity defects.
 3. Zero privacy leaks (no Telegram ID, `@username`, or phone number exposure) observed across tested Telegram clients.
-4. All supported media types relay via `file_id` with `< 10 MiB` enforcement and zero disk media retention (`/tmp` clean).
+4. All supported media types (text, photo, video `< 10 MiB`, voice, audio, documents/files) relay via `file_id` with the strict `< 10 MiB` (`10,485,760` bytes) video size restriction enforced and zero disk media retention (`/tmp` clean).
 5. Persistent PostgreSQL/Redis state and Redis polling lock clean release/re-acquisition confirmed across container restart (Scenario 13).
-6. Product decision recorded for the deferred insufficient-balance settlement policy before any production go-live.
+6. Explicit project-owner decision recorded for the currently unresolved insufficient-balance settlement policy before any production go-live (Scenario 11b remains `BLOCKED / POLICY UNRESOLVED` until decided).
 
 ### Go / No-Go Report Template
 
@@ -486,10 +498,10 @@ docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.s
 - **Manual UAT Summary (Scenarios 1–14):**
   - Passed: __ / 14
   - Failed: __ (list UAT-DEF IDs)
-  - Blocked / Not Executed: __
-- **Product Decision on Unresolved Insufficient-Balance Policy:**
-  - [ ] Keep deferred settlement (`is_charged=False`, chat stays open)
-  - [ ] Change policy in follow-up task (specify requirement)
+  - Blocked / Policy Unresolved / Not Executed: __
+- **Insufficient-Balance Settlement Policy Status:** `BLOCKED / POLICY UNRESOLVED` *(no policy decision authorized by UAT; requires explicit project-owner specification)*
+  - [ ] Project owner has formally decided and approved the insufficient-balance policy (decision reference: ___)
+  - [ ] Still unresolved — **NO-GO for production launch**
 - **Recommendation:** **GO FOR NEXT PHASE** / **NO-GO (BLOCKED)**
 - **Blocking Items (if No-Go):** ...
 ```
