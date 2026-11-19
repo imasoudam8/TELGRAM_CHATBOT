@@ -1,6 +1,7 @@
 # Environment and local secrets
 .env*
 !.env.example
+!.env.staging.example
 .DS_Store
 *.log
 

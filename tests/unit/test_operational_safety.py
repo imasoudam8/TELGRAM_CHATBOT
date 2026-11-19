@@ -249,3 +249,32 @@ def test_pg_client_version_parsing_and_compatibility_guard(test_settings: Settin
     ):
         versions = assert_pg_tools_compatible(test_settings, tools=("pg_dump", "pg_restore"))
         assert versions == {"server": 16, "pg_dump": 16, "pg_restore": 16}
+
+
+def test_staging_isolation_compose_and_template_hygiene() -> None:
+    """Verify staging Compose override and env template enforce strict isolation & placeholders."""
+    compose_staging = (PROJECT_ROOT / "docker-compose.staging.yml").read_text(encoding="utf-8")
+    assert "matching_bot_staging_postgres" in compose_staging
+    assert "matching_bot_staging_redis" in compose_staging
+    assert "matching_bot_staging_app" in compose_staging
+    assert "matching_bot_staging_internal" in compose_staging
+    assert "matching_bot_staging_postgres_data" in compose_staging
+    assert "matching_bot_staging_redis_data" in compose_staging
+    assert "APP_ENV: staging" in compose_staging
+    assert 'REQUIRE_MIGRATIONS_CURRENT: "true"' in compose_staging
+    assert "read_only: true" in compose_staging
+    assert "--maxmemory-policy noeviction" in compose_staging
+    assert "security_opt:" not in compose_staging
+    assert "ports:" not in compose_staging
+
+    env_staging = (PROJECT_ROOT / ".env.staging.example").read_text(encoding="utf-8")
+    assert "APP_ENV=staging" in env_staging
+    assert "POSTGRES_DB=matching_bot_staging" in env_staging
+    assert "PLACEHOLDER_" in env_staging
+
+    ci_yml = (PROJECT_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "docker-compose.staging.yml" in ci_yml
+
+    uat_doc = (PROJECT_ROOT / "docs/operations/staging-uat-runbook.md").read_text(encoding="utf-8")
+    assert "NOT_EXECUTED" in uat_doc
+    assert "Go / No-Go" in uat_doc

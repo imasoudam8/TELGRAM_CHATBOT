@@ -177,3 +177,47 @@ def test_production_constraints_require_strong_redis_password_and_echo_false() -
         REDIS_PASSWORD=SecretStr("StrongRedisPassword123!"),
     )
     assert valid_prod.effective_require_migrations_current is True
+
+
+def test_staging_constraints_reject_weak_credentials_and_require_migrations() -> None:
+    """Ensure staging enforces strong credentials, non-placeholder token, and migration guard."""
+    with pytest.raises(ValidationError, match="Staging environment cannot use example"):
+        Settings(
+            APP_ENV=AppEnvironment.STAGING,
+            BOT_TOKEN=SecretStr("123456789:PLACEHOLDER_REPLACE_WITH_DEDICATED_STAGING_BOT_TOKEN"),
+            POSTGRES_PASSWORD=SecretStr("StrongStagingPassword123!"),
+            REDIS_PASSWORD=SecretStr("StrongStagingRedisPass123!"),
+        )
+
+    with pytest.raises(ValidationError, match="Staging environment must not use trivial"):
+        Settings(
+            APP_ENV=AppEnvironment.STAGING,
+            BOT_TOKEN=SecretStr("123456789:ValidStagingBotTokenHash12345"),
+            POSTGRES_PASSWORD=SecretStr("postgres_secure_dev_password"),
+            REDIS_PASSWORD=SecretStr("StrongStagingRedisPass123!"),
+        )
+
+    with pytest.raises(ValidationError, match="REDIS_PASSWORD"):
+        Settings(
+            APP_ENV=AppEnvironment.STAGING,
+            BOT_TOKEN=SecretStr("123456789:ValidStagingBotTokenHash12345"),
+            POSTGRES_PASSWORD=SecretStr("StrongStagingPassword123!"),
+            REDIS_PASSWORD=None,
+        )
+
+    with pytest.raises(ValidationError, match="POSTGRES_ECHO=false"):
+        Settings(
+            APP_ENV=AppEnvironment.STAGING,
+            BOT_TOKEN=SecretStr("123456789:ValidStagingBotTokenHash12345"),
+            POSTGRES_PASSWORD=SecretStr("StrongStagingPassword123!"),
+            REDIS_PASSWORD=SecretStr("StrongStagingRedisPass123!"),
+            POSTGRES_ECHO=True,
+        )
+
+    valid_staging = Settings(
+        APP_ENV=AppEnvironment.STAGING,
+        BOT_TOKEN=SecretStr("123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ_CI_TEST_TOKEN"),
+        POSTGRES_PASSWORD=SecretStr("StrongStagingPassword123!"),
+        REDIS_PASSWORD=SecretStr("StrongStagingRedisPass123!"),
+    )
+    assert valid_staging.effective_require_migrations_current is True

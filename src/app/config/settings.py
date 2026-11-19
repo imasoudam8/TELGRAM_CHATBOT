@@ -221,15 +221,24 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_constraints(self) -> "Settings":
-        """Enforce strict security constraints when running in production."""
-        if self.APP_ENV == AppEnvironment.PRODUCTION:
+        """Enforce strict security constraints in production and staging environments."""
+        if self.APP_ENV in {AppEnvironment.PRODUCTION, AppEnvironment.STAGING}:
             raw_token = self.BOT_TOKEN.get_secret_value().strip()
             upper_token = raw_token.upper()
-            if any(
-                marker in upper_token
-                for marker in ("EXAMPLE", "TEST", "PLACEHOLDER", "CHANGEME", "YOUR_")
-            ):
-                raise ValueError("Production environment cannot use example or test bot tokens.")
+            forbidden_markers = (
+                ("EXAMPLE", "TEST", "PLACEHOLDER", "CHANGEME", "YOUR_")
+                if self.APP_ENV == AppEnvironment.PRODUCTION
+                else ("EXAMPLE", "PLACEHOLDER", "CHANGEME", "YOUR_")
+            )
+            env_label = "Production" if self.APP_ENV == AppEnvironment.PRODUCTION else "Staging"
+            if any(marker in upper_token for marker in forbidden_markers):
+                if self.APP_ENV == AppEnvironment.PRODUCTION:
+                    raise ValueError(
+                        "Production environment cannot use example or test bot tokens."
+                    )
+                raise ValueError(
+                    "Staging environment cannot use example or placeholder bot tokens."
+                )
 
             raw_db_pass = self.POSTGRES_PASSWORD.get_secret_value().strip()
             weak_passwords = {
@@ -246,7 +255,7 @@ class Settings(BaseSettings):
             }
             if raw_db_pass.lower() in weak_passwords or len(raw_db_pass) < 12:
                 raise ValueError(
-                    "Production environment must not use trivial or default database passwords."
+                    f"{env_label} environment must not use trivial or default database passwords."
                 )
 
             raw_redis_pass = (
@@ -258,13 +267,13 @@ class Settings(BaseSettings):
                 or len(raw_redis_pass) < 12
             ):
                 raise ValueError(
-                    "Production environment requires a non-trivial REDIS_PASSWORD "
+                    f"{env_label} environment requires a non-trivial REDIS_PASSWORD "
                     "(minimum 12 characters)."
                 )
 
             if self.POSTGRES_ECHO:
                 raise ValueError(
-                    "Production environment must set POSTGRES_ECHO=false to avoid "
+                    f"{env_label} environment must set POSTGRES_ECHO=false to avoid "
                     "logging SQL statements."
                 )
 

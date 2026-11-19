@@ -32,7 +32,10 @@ from src.app.modules.chat.session_service import (
     ChatService,
     RelayMessageResult,
 )
-from src.app.modules.notifications.service import NotificationService
+from src.app.modules.notifications.service import (
+    NotificationService,
+    execute_telegram_send_with_retry,
+)
 from src.app.modules.wallet.settlement import ChatSettlementService
 
 logger = logging.getLogger(__name__)
@@ -43,52 +46,64 @@ async def _deliver_relayed_message(bot: Bot | None, result: RelayMessageResult) 
     if bot is None:
         return False
 
-    try:
-        escaped_caption = html.escape(result.caption) if result.caption else None
-        if result.message_type == "TEXT":
-            await bot.send_message(
+    escaped_caption = html.escape(result.caption) if result.caption else None
+    if result.message_type == "TEXT":
+
+        async def _send() -> object:
+            return await bot.send_message(
                 chat_id=result.recipient_telegram_id,
                 text=html.escape(result.text or ""),
             )
-        elif result.message_type == "PHOTO" and result.telegram_file_id:
-            await bot.send_photo(
+    elif result.message_type == "PHOTO" and result.telegram_file_id:
+        file_id = result.telegram_file_id
+
+        async def _send() -> object:
+            return await bot.send_photo(
                 chat_id=result.recipient_telegram_id,
-                photo=result.telegram_file_id,
+                photo=file_id,
                 caption=escaped_caption,
             )
-        elif result.message_type == "VIDEO" and result.telegram_file_id:
-            await bot.send_video(
+    elif result.message_type == "VIDEO" and result.telegram_file_id:
+        file_id = result.telegram_file_id
+
+        async def _send() -> object:
+            return await bot.send_video(
                 chat_id=result.recipient_telegram_id,
-                video=result.telegram_file_id,
+                video=file_id,
                 caption=escaped_caption,
             )
-        elif result.message_type == "VOICE" and result.telegram_file_id:
-            await bot.send_voice(
+    elif result.message_type == "VOICE" and result.telegram_file_id:
+        file_id = result.telegram_file_id
+
+        async def _send() -> object:
+            return await bot.send_voice(
                 chat_id=result.recipient_telegram_id,
-                voice=result.telegram_file_id,
+                voice=file_id,
                 caption=escaped_caption,
             )
-        elif result.message_type == "STICKER" and result.telegram_file_id:
-            await bot.send_sticker(
+    elif result.message_type == "STICKER" and result.telegram_file_id:
+        file_id = result.telegram_file_id
+
+        async def _send() -> object:
+            return await bot.send_sticker(
                 chat_id=result.recipient_telegram_id,
-                sticker=result.telegram_file_id,
+                sticker=file_id,
             )
-        elif result.message_type == "ANIMATION" and result.telegram_file_id:
-            await bot.send_animation(
+    elif result.message_type == "ANIMATION" and result.telegram_file_id:
+        file_id = result.telegram_file_id
+
+        async def _send() -> object:
+            return await bot.send_animation(
                 chat_id=result.recipient_telegram_id,
-                animation=result.telegram_file_id,
+                animation=file_id,
                 caption=escaped_caption,
             )
-        else:
-            return False
-        return True
-    except Exception as exc:
-        logger.warning(
-            "Telegram relay delivery failed (%s) for chat=%s",
-            type(exc).__name__,
-            result.chat_id,
-        )
+    else:
         return False
+
+    return await execute_telegram_send_with_retry(
+        _send, context_label=f"chat_relay:{result.chat_id}"
+    )
 
 
 def _extract_payload(

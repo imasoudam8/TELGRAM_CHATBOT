@@ -93,3 +93,5 @@ Before switching to live production traffic, verify the following manually in a 
 3. **Oversized Video & Privacy Check**: Send a `>= 10 MiB` video (verify Persian size rejection without forwarding) and inspect profile cards / notifications on both accounts to confirm neither account sees the other's `@username`, phone number, or Telegram numeric ID.
 4. **Live Termination & Moderation**: Tap `❌ پایان گفتگو` and `🚫 مسدود کردن مخاطب` on mobile; confirm reply keyboard reverts to the main menu for both participants and blocked partner disappears from discovery & connections.
 5. **Wallet & Daily Reset Spot Check**: Inspect `🪙 کیف پول`, confirm daily free coin expiry timestamp renders in `Asia/Tehran` time, exchange two-sided messages, and verify balance deduction and `📜 تاریخچه تراکنش‌ها` pagination.
+
+For full isolated staging deployment templates, two-account test cases (`A`–`I`), client compatibility matrix, defect template, and Go/No-Go sign-off criteria, see `docs/operations/staging-uat-runbook.md`.

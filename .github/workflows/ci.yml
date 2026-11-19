@@ -141,6 +141,7 @@ jobs:
           REDIS_PASSWORD: "StrongCiValidationRedisPass_99!"
         run: |
           docker compose -f docker-compose.yml config > /dev/null
+          docker compose -f docker-compose.yml -f docker-compose.staging.yml config > /dev/null
           docker compose -f docker-compose.yml -f docker-compose.prod.yml config > /dev/null
 
       - name: Build Production Docker Image

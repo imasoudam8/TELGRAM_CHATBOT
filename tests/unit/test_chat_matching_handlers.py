@@ -350,3 +350,62 @@ async def test_chat_router_end_commands_and_plain_text_relay_no_filter_type_erro
         assert "مخاطب شما گفتگو را پایان داد" in harness.latest_text_for(601002)
     finally:
         await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_telegram_rate_limit_retry_and_non_retryable_errors() -> None:
+    """Verify bounded Retry-After recovery, long Retry-After rejection, and Forbidden handling."""
+    from aiogram.exceptions import (
+        TelegramForbiddenError,
+        TelegramNetworkError,
+        TelegramRetryAfter,
+    )
+    from aiogram.methods import SendMessage
+
+    from src.app.bot.handlers.chat import _deliver_relayed_message
+    from src.app.modules.chat.session_service import RelayMessageResult
+    from src.app.modules.notifications.service import NotificationService
+
+    dummy_method = SendMessage(chat_id=12345, text="hi")
+    notifier = NotificationService()
+
+    # 1. Short TelegramRetryAfter (<= 5s) retries once and succeeds
+    bot_retry_ok = _make_bot()
+    bot_retry_ok.send_message.side_effect = [
+        TelegramRetryAfter(method=dummy_method, message="Too Many Requests", retry_after=0.01),
+        MagicMock(),
+    ]
+    assert await notifier.send_safe_message(bot_retry_ok, 12345, "سلام") is True
+    assert bot_retry_ok.send_message.await_count == 2
+
+    # 2. Excessive TelegramRetryAfter (> 5s) aborts cleanly without blocking
+    bot_retry_long = _make_bot()
+    bot_retry_long.send_message.side_effect = TelegramRetryAfter(
+        method=dummy_method, message="Too Many Requests", retry_after=30
+    )
+    assert await notifier.send_safe_message(bot_retry_long, 12345, "سلام") is False
+    assert bot_retry_long.send_message.await_count == 1
+
+    # 3. TelegramForbiddenError does not retry and returns False cleanly
+    bot_forbidden = _make_bot()
+    bot_forbidden.send_message.side_effect = TelegramForbiddenError(
+        method=dummy_method, message="Forbidden: bot was blocked by the user"
+    )
+    assert await notifier.send_safe_message(bot_forbidden, 12345, "سلام") is False
+    assert bot_forbidden.send_message.await_count == 1
+
+    # 4. Relay helper recovers from single transient TelegramNetworkError
+    bot_net_ok = _make_bot()
+    bot_net_ok.send_message.side_effect = [
+        TelegramNetworkError(method=dummy_method, message="Temporary timeout"),
+        MagicMock(),
+    ]
+    relay = RelayMessageResult(
+        message_id=1,
+        chat_id=uuid.uuid4(),
+        recipient_telegram_id=999,
+        message_type="TEXT",
+        text="متن امن",
+    )
+    assert await _deliver_relayed_message(bot_net_ok, relay) is True
+    assert bot_net_ok.send_message.await_count == 2

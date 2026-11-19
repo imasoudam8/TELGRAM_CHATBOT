@@ -1,0 +1,80 @@
+# Isolated Staging Docker Compose Override:
+# Usage:
+#   docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.staging.yml up -d --build
+#
+# Guarantees complete container, network, volume, database, and Redis isolation
+# from both local development and production stacks. Never deploy to production.
+
+services:
+  postgres:
+    container_name: matching_bot_staging_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set in staging}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in staging}
+      POSTGRES_DB: ${POSTGRES_DB:-matching_bot_staging}
+
+  redis:
+    container_name: matching_bot_staging_redis
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in staging}
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in staging}
+    command:
+      - sh
+      - -c
+      - >
+        exec redis-server
+        --save 60 1000
+        --appendonly yes
+        --maxmemory 256mb
+        --maxmemory-policy noeviction
+        --requirepass "$REDIS_PASSWORD"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  bot:
+    container_name: matching_bot_staging_app
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    env_file:
+      - path: .env.staging
+        required: false
+    environment:
+      APP_ENV: staging
+      APP_NAME: ${APP_NAME:-Anonymous Telegram Matching & Chat Bot [Staging]}
+      BOT_TOKEN: ${BOT_TOKEN:?BOT_TOKEN must be set in staging}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set in staging}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in staging}
+      POSTGRES_DB: ${POSTGRES_DB:-matching_bot_staging}
+      POSTGRES_ECHO: "false"
+      REDIS_DB: ${REDIS_DB:-1}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in staging}
+      REQUIRE_MIGRATIONS_CURRENT: "true"
+      HEALTH_SERVER_ENABLED: "true"
+      HEALTH_HOST: "127.0.0.1"
+      HEALTH_PORT: "8080"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: json
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.app.infrastructure.healthcheck", "--check-migrations"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 25s
+
+networks:
+  bot_internal:
+    name: matching_bot_staging_internal
+    driver: bridge
+
+volumes:
+  postgres_data:
+    name: matching_bot_staging_postgres_data
+  redis_data:
+    name: matching_bot_staging_redis_data
