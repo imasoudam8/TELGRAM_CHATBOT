@@ -5,7 +5,7 @@ import logging
 import uuid
 
 from aiogram import Bot, F, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, or_f
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
@@ -432,7 +432,7 @@ def get_chat_router() -> Router:
     router.message.register(
         handle_end_chat_message,
         ActiveChatFilter(),
-        (F.text == BTN_END_CHAT) | Command("end") | Command("endchat"),
+        or_f(F.text == BTN_END_CHAT, Command("end"), Command("endchat")),
     )
     router.message.register(
         handle_block_partner_message,

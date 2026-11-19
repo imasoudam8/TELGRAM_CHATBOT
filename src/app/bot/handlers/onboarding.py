@@ -4,6 +4,7 @@ import logging
 
 from aiogram import F, Router
 from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from src.app.bot.keyboards.onboarding import (
@@ -98,6 +99,7 @@ def _format_user_restriction(user: User, settings: Settings) -> str:
 
 async def handle_start(
     message: Message,
+    state: FSMContext | None = None,
     db_manager: DatabaseManager | None = None,
     settings: Settings | None = None,
 ) -> None:
@@ -108,6 +110,9 @@ async def handle_start(
     """
     if message.from_user is None:
         return
+
+    if state is not None:
+        await state.clear()
 
     telegram_user_id = message.from_user.id
     settings = settings or get_settings()

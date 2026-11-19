@@ -124,23 +124,25 @@ def get_public_profile_detail_keyboard(
                 )
             ]
         )
-    rows.append(
+    rows.extend(
         [
-            InlineKeyboardButton(
-                text="🚫 مسدود کردن کاربر",
-                callback_data=f"{CB_DISC_BLK_PREFIX}{profile.public_id}",
-            ),
-            InlineKeyboardButton(
-                text="🔎 مرور پروفایل‌ها",
-                callback_data=f"{CB_DISC_BROWSE_PREFIX}0:0",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text="🚨 گزارش تخلف",
-                callback_data=f"{CB_REPORT_START_USER_PREFIX}{profile.public_id}",
-            )
-        ],
+            [
+                InlineKeyboardButton(
+                    text="🚫 مسدود کردن کاربر",
+                    callback_data=f"{CB_DISC_BLK_PREFIX}{profile.public_id}",
+                ),
+                InlineKeyboardButton(
+                    text="🔎 مرور پروفایل‌ها",
+                    callback_data=f"{CB_DISC_BROWSE_PREFIX}0:0",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🚨 گزارش تخلف",
+                    callback_data=f"{CB_REPORT_START_USER_PREFIX}{profile.public_id}",
+                )
+            ],
+        ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

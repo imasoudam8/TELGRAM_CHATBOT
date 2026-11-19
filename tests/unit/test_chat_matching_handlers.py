@@ -296,3 +296,57 @@ def test_menu_button_labels_present_in_onboarding_constants() -> None:
     assert BTN_VIEW_PROFILES == "🔎 مشاهده پروفایلها"
     assert BTN_DIRECT_REQUEST == "✉️ درخواست مستقیم"
     assert BTN_MY_CONNECTIONS == "👥 ارتباطهای من"
+
+
+@pytest.mark.asyncio
+async def test_chat_router_end_commands_and_plain_text_relay_no_filter_type_error(
+    sqlite_engine: AsyncEngine,
+    test_settings: Settings,
+) -> None:
+    """Regression test: or_f(F.text == BTN_END_CHAT, Command('end'), Command('endchat'))."""
+    from tests.helpers.telegram_harness import TelegramTestHarness
+
+    db = SQLiteDBWrapper(sqlite_engine)
+    user_svc = UserService(db)
+    prof_svc = ProfileService(db)
+    u1, _ = await user_svc.register_adult_user(601001, test_settings.business_timezone)
+    u2, _ = await user_svc.register_adult_user(601002, test_settings.business_timezone)
+    await prof_svc.create_profile(
+        601001, ProfileData(display_name="کاربر تست الف", age=24, gender="MALE")
+    )
+    await prof_svc.create_profile(
+        601002, ProfileData(display_name="کاربر تست ب", age=24, gender="FEMALE")
+    )
+
+    chat_id = uuid.uuid4()
+    async with db.session() as session:
+        session.add(
+            ChatSession(
+                id=chat_id,
+                chat_type="RANDOM",
+                participant_one_id=u1.id,
+                participant_two_id=u2.id,
+                status="ACTIVE",
+                is_charged=False,
+            )
+        )
+        await session.flush()
+        session.add_all(
+            [
+                ActiveChatParticipant(user_id=u1.id, chat_id=chat_id),
+                ActiveChatParticipant(user_id=u2.id, chat_id=chat_id),
+            ]
+        )
+
+    harness = TelegramTestHarness(settings=test_settings, db_manager=db)  # type: ignore[arg-type]
+    try:
+        # Plain text in active chat previously crashed MagicFilter with TypeError on Command
+        await harness.send_text(601001, "پیام معمولی")
+        assert harness.latest_text_for(601002) == "پیام معمولی"
+
+        # /end command terminates active chat cleanly
+        await harness.send_command(601001, "/end")
+        assert "پایان رسید" in harness.latest_text_for(601001)
+        assert "مخاطب شما گفتگو را پایان داد" in harness.latest_text_for(601002)
+    finally:
+        await harness.close()
